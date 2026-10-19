@@ -12,7 +12,7 @@ import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S, SDK_CURRENT_MAJOR } from "./context.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
+import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 
 interface InstanceCaller {
@@ -156,7 +156,8 @@ export class InternalApi {
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
       manifest = v.manifest;
-    } else if (!app || app.entry.manifestDigest !== r.manifestDigest) {
+    } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {
+      // G2b: the claim may carry the serving digest or, mid-attempt, the candidate digest; anything else is refused
       throw new BridgeError("manifest_mismatch", 409);
     }
     // Build the COMPLETE answer first; record the claim and consume the one-time code only when it is complete.
