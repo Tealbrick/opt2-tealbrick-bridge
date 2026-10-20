@@ -45,7 +45,7 @@ export interface CallRequest {
 
 export type CallOutcome = OpResult<JsonValue>;
 
-const RESOLVE_TTL_MS = 5 * 60_000;
+export const RESOLVE_TTL_MS = 5 * 60_000;
 const APP_TIMEOUT_MS = 30_000;
 /** F57a: message of a call cut off at the drain bound (it may have run: the caller checks before retrying) */
 const CUT_OFF = "the bridge restarted while this call ran; its outcome is unknown, check before retrying";
@@ -170,13 +170,16 @@ export class CallRouter {
 
   constructor(ctx: BridgeContext) {
     this.ctx = ctx;
-    ctx.on("table", () => {
-      this.catalogCache.clear();
+    // C296: expire, never drop: the next listing asks the apps again, and a refresh that fails falls back to the last
+    // good answer instead of an empty list (`catalogFresh`).
+    ctx.on("table", (next: Table | undefined) => {
+      this.expireCatalogs();
+      // an instance that left the table never answers again: its cached catalogs go (review: the cache is pruned)
+      const live = new Set([...(next?.apps.values() ?? [])].map((a) => String(a.entry.ins)));
+      for (const key of this.catalogCache.keys()) if (!live.has(key.slice(0, key.indexOf("|")))) this.catalogCache.delete(key);
     });
     // C283 A1: `admitted` marks follow the app's owner rows, which changed
-    ctx.on("scopes", () => {
-      this.catalogCache.clear();
-    });
+    ctx.on("scopes", () => this.expireCatalogs());
   }
 
   /**
@@ -243,17 +246,39 @@ export class CallRouter {
   }
 
   /**
+   * C296: a tool index past its TTL is rebuilt from fresh catalogs: the agent's cached answers are EXPIRED (not dropped),
+   * so a refresh that fails falls back to the last good answer (`catalogFresh`).
+   */
+  expireCatalogs(agent?: AgentId): void {
+    for (const [key, hit] of this.catalogCache) if (!agent || key.endsWith(`|${agent}`)) this.catalogCache.set(key, { ...hit, at: 0 });
+  }
+
+  /**
    * C283 A1 (spec 0.1.50): the body carries `agent`, so the SDK can mark the entries that agent's owner rows admit
    * (`admitted: "owner"`). The marks differ per agent, so the cache is per agent too. Not bound by the bridge-op proof.
    */
   async catalog(app: AppRuntime, op: string, agent: AgentId): Promise<DynamicCatalogEntry[]> {
+    return (await this.catalogFresh(app, op, agent)).entries;
+  }
+
+  /**
+   * C296: the catalog, and whether it is the last good answer served because a refresh failed (`stale`: the caller retries
+   * soon). A failure with no earlier answer throws, as before.
+   */
+  async catalogFresh(app: AppRuntime, op: string, agent: AgentId): Promise<{ entries: DynamicCatalogEntry[]; stale: boolean }> {
     const key = `${app.entry.ins}|${op}|${agent}`;
     const hit = this.catalogCache.get(key);
-    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.entries;
-    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, agent });
+    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return { entries: hit.entries, stale: false };
+    let entries: DynamicCatalogEntry[] | undefined;
+    try {
+      entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, agent });
+    } catch (error) {
+      if (hit) return { entries: hit.entries, stale: true };
+      throw error;
+    }
     const list = Array.isArray(entries) ? entries.slice(0, 256) : [];
     this.catalogCache.set(key, { at: Date.now(), entries: list });
-    return list;
+    return { entries: list, stale: false };
   }
 
   async search(app: AppRuntime, op: string, query: string, limit: number | undefined, agent: AgentId): Promise<DynamicCatalogEntry[]> {
