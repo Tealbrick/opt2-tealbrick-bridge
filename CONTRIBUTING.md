@@ -35,7 +35,7 @@ pnpm test          # agent-side-gate, builds, then node --test over packages/*/t
 pnpm conformance   # tb-conformance bridge against the real build; waivers: none
 ```
 
-Recorded at last check (bridge 0.2.3): 369 tests pass, 0 fail, 0 skipped; conformance bridge target 251 pass, 1 not applicable, 0 fail, 0 waivers (the relay target runs in the CLI repo).
+Recorded at last check (bridge 0.2.5, conformance 0.1.27): 409 tests pass, 0 fail, 0 skipped; conformance bridge target 252 pass, 2 not applicable, 0 fail, 0 waivers (B5.gate_scoped_above_grant runs because the bridge reports `owner_rows`; the relay target runs in the CLI repo).
 
 ## Releasing
 
