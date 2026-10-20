@@ -10,6 +10,7 @@ import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
+import { ProofCaps } from "./proof-caps.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -83,6 +84,8 @@ export class BridgeContext extends EventEmitter {
   /** last successful config pull (epoch s) */
   lastPull = 0;
   readonly health = new Map<InstanceId, AppHealth>();
+  /** C268c: which hook apps accept `bd` in the call proof (proof-caps.ts) */
+  readonly proofCaps = new ProofCaps();
   readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
   /** when each app instance was last asked for its scope summary (ms), and the request in flight (scope-summary.ts) */
   readonly scopeSummaryAt = new Map<InstanceId, number>();
@@ -176,6 +179,8 @@ export class BridgeContext extends EventEmitter {
   swapTable(next: Table): void {
     const prev = this.table;
     this.table = next;
+    // C268c: a config change of an app's digest, version or update candidate drops its hook proof capabilities, before any call uses the new table
+    this.proofCaps.onTable(next, prev);
     this.emit("table", next, prev);
   }
 }

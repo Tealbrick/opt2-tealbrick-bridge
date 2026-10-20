@@ -215,6 +215,8 @@ export class InternalApi {
       ctx.state.claims.splice(ctx.state.claims.indexOf(record), 1);
       throw e;
     }
+    // C268c: an APP-INSTANCE claim sets the hook proof capabilities (the claim's set); a companion service claim never does
+    if (!service) ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
     sendJson(res, 200, out);
@@ -230,6 +232,8 @@ export class InternalApi {
     if (!caller.svc) {
       const prev = ctx.health.get(caller.ins);
       ctx.health.set(caller.ins, { status: body, lastSeen: nowS() });
+      // C268c: an authenticated push of the app instance (a service push never gets here) states its proof capabilities
+      ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims);
       if (!prev || prev.status.scopesRev !== body.scopesRev) void refreshScopeSummary(this.ctx, this.router, caller.ins, true);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
       // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)

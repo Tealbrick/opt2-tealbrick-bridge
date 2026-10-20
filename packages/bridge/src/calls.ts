@@ -385,6 +385,10 @@ export class CallRouter {
     if (!id) throw new BridgeError("hook_failed", 503);
     const now = nowS();
     const context = (request.context ?? {}) as Json;
+    // C268 B / C268c: serialise ONCE, hash those bytes, send those bytes. `bd` only when the app's stored capability set
+    // (its claim, then its status pushes) lists "bd"; never inferred from a version, never dropped by a failed call.
+    const bytes = Buffer.from(JSON.stringify(request), "utf8");
+    const bd = this.ctx.proofCaps.hasBd(h.ins) ? this.ctx.api.sha256Bytes(bytes) : undefined;
     const proof = await this.ctx.api.signJws(
       TYP.callProof,
       {
@@ -399,13 +403,16 @@ export class CallRouter {
         phase: h.phase,
         ctx: this.ctx.api.digest(context),
         ...(input !== undefined ? { in: this.ctx.api.digest(input) } : {}),
+        ...(bd ? { bd } : {}),
       },
       id.key,
     );
+    // a refusal (401 included), a timeout or a connect failure ends this hook call as `hook_failed`: there is no second try,
+    // with or without `bd`, and the stored capability is not touched (C268c)
     const res = await this.ctx.fetch(new URL(`/tb/v1/hooks/${h.hookId}`, app.entry.internalUrl), {
       method: "POST",
       headers: { "content-type": "application/json", "TB-Call": proof },
-      body: JSON.stringify(request),
+      body: bytes,
       redirect: "error",
       signal: AbortSignal.timeout(Math.min(Math.max(h.timeoutMs, 100), 2_000)),
     });

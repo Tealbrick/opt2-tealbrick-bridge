@@ -82,7 +82,8 @@ export const hookManifest = {
 
 export interface AppLog {
   ops: { op: string; auth: string | undefined; proof: string | undefined; body: Record<string, unknown> }[];
-  hooks: { hook: string; body: Record<string, unknown> }[];
+  /** every hook request the guard app received: the parsed body, the EXACT bytes and the `TB-Call` proof */
+  hooks: { hook: string; body: Record<string, unknown>; raw: Buffer; proof: string | undefined }[];
 }
 
 export interface World {
@@ -99,7 +100,7 @@ export interface World {
   signRaw(input: string): Promise<string>;
   acks: StatusReport[];
   appLog: AppLog;
-  hookMode: { mode: "allow" | "deny" | "fail"; answer?: (hook: string, body: Record<string, unknown>) => unknown | Promise<unknown> };
+  hookMode: { mode: "allow" | "deny" | "fail"; /** answer every hook request with this HTTP status and no body (a 401 test) */ status?: number; answer?: (hook: string, body: Record<string, unknown>) => unknown | Promise<unknown> };
   /** publish a new config revision (tweak: mutate THIS revision only) */
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   /** change the base config for every later revision (what Core keeps listing), then publish */
@@ -296,8 +297,12 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     const url = new URL(req.url ?? "/", "http://x");
     if (url.pathname === "/tb/v1/manifest") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(hookManifest));
     if (url.pathname.startsWith("/tb/v1/hooks/")) {
-      const b = await body(req);
-      appLog.hooks.push({ hook: url.pathname.slice(13), body: b });
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks);
+      const b = raw.length ? JSON.parse(raw.toString("utf8")) : undefined;
+      appLog.hooks.push({ hook: url.pathname.slice(13), body: b, raw, proof: req.headers["tb-call"] as string | undefined });
+      if (hookMode.status !== undefined) return res.writeHead(hookMode.status).end();
       if (hookMode.mode === "fail") return res.writeHead(500).end();
       const custom = await hookMode.answer?.(url.pathname.slice(13), b);
       if (custom !== undefined) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom));
