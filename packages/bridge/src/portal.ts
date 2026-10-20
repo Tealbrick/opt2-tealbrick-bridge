@@ -10,7 +10,7 @@ import { isRefusal, type Json } from "./api.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { buildTable, internalUrlAllowed, type Table } from "./table.ts";
+import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
@@ -129,14 +129,17 @@ export function startManifestRetry(ctx: BridgeContext, signal: AbortSignal): voi
     try {
       for (const app of t.apps.values()) {
         if (!app.down || app.refused) continue;
-        const key = `${app.entry.ins}|${app.entry.manifestDigest}`;
+        // G2b: the candidate digest is part of the key (a new candidate in a later config is a new key, refetch)
+        const accepted = acceptedDigests(app.entry);
+        const key = `${app.entry.ins}|${accepted.join("|")}`;
         const a = attempts.get(key) ?? { at: 0, delay: 2_000 };
         if (Date.now() < a.at) continue;
         try {
           const m = await fetchManifestFrom(ctx, app.entry);
           const got = ctx.api.manifestDigest(m);
-          if (got !== app.entry.manifestDigest) throw new ManifestError("manifest_mismatch", got);
+          if (!accepted.includes(got)) throw new ManifestError("manifest_mismatch", got);
           app.manifest = m;
+          app.digest = got;
           app.ops = new Map(ctx.api.withStandardOps(m).map((op) => [op.id, op]));
           app.scopeTypes = (m.scopes ?? []).map((sc) => sc.type);
           app.declaredHooks = m.hooks ?? [];
@@ -179,6 +182,7 @@ export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown
     product: app.product,
     code: mismatch ? "manifest_mismatch" : e instanceof ManifestError ? e.message : "fetch_failed",
     expected: app.manifestDigest,
+    ...(acceptedDigests(app).length > 1 ? { expectedCandidate: acceptedDigests(app)[1] } : {}),
     ...(mismatch ? { served: (e as ManifestError).served } : {}),
   });
 }
@@ -359,7 +363,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       state,
       version: h?.status.version ?? null,
       sdkVersion: h?.status.sdkVersion ?? null,
-      manifestDigest: a.manifest ? a.entry.manifestDigest : null,
+      // G2b: the digest of the manifest the service actually serves (the serving or the candidate digest)
+      manifestDigest: a.manifest ? (a.digest ?? a.entry.manifestDigest) : null,
       lastSeen: h ? new Date(h.lastSeen * 1000).toISOString() : null,
       pendingHolds: h?.status.pendingHolds ?? 0,
       // the slice revision the app last reported it holds (AppStatus.sliceRevision); omitted before its first report

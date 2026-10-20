@@ -18,9 +18,29 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { KeySet, ManifestApi, OperationView, TrustContext } from "./api.ts";
 import { isRefusal } from "./api.ts";
 
+/**
+ * Spec 0.1.51 (G2b, INC-20261019-04): `apps[]` entries carry `candidateManifestDigest` + `candidateVersion` (both or neither) ONLY
+ * while Core runs a health-gated update attempt of that instance; `manifestDigest` stays the SERVING release. The bridge accepts
+ * a running service whose manifest digest equals EITHER value, in every place that compares digests (this file, portal.ts retry,
+ * internal.ts claim). A digest equal to neither is still `manifest_mismatch`.
+ * TODO(0.1.33): re-pin @opt2-tealbrick/spec 0.1.51 on the 0.1.x line and drop this local type; 0.1.51 does not type-check against
+ * the manifest package of this line, so the two fields are typed here (the wire shape is the 0.1.51 one).
+ */
+export type CandidateFields = { candidateManifestDigest?: string; candidateVersion?: string };
+
+/** The manifest digests this entry accepts: the serving one and, only when BOTH candidate fields are present, the candidate. */
+export function acceptedDigests(entry: AppEntry): AppEntry["manifestDigest"][] {
+  const c = entry as AppEntry & CandidateFields;
+  return typeof c.candidateManifestDigest === "string" && typeof c.candidateVersion === "string" && c.candidateManifestDigest !== entry.manifestDigest
+    ? [entry.manifestDigest, c.candidateManifestDigest as AppEntry["manifestDigest"]]
+    : [entry.manifestDigest];
+}
+
 export interface AppRuntime {
   entry: AppEntry;
   manifest: Manifest | undefined;
+  /** the digest of `manifest` = the release that RUNS (the serving or the candidate digest of `entry`); reported in the status report */
+  digest?: AppEntry["manifestDigest"];
   /** op id → view (manifest ops + standard ops) */
   ops: Map<string, OperationView>;
   scopeTypes: string[];
@@ -143,21 +163,25 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 export async function buildTable(input: BuildInput): Promise<Table> {
   const { api, config, now } = input;
   const prevByDigest = new Map<string, Manifest>();
-  for (const a of input.previous?.apps.values() ?? []) if (a.manifest) prevByDigest.set(a.entry.manifestDigest, a.manifest);
+  for (const a of input.previous?.apps.values() ?? []) if (a.manifest) prevByDigest.set(a.digest ?? a.entry.manifestDigest, a.manifest);
 
   const runtimes = await mapLimit(config.apps, 4, async (entry): Promise<AppRuntime> => {
     if (input.internalUrlAllowed && !input.internalUrlAllowed(entry)) {
       input.reject({ kind: "config", code: "internal_url_refused", detail: `ins ${entry.ins}` });
       return { entry, manifest: undefined, ops: new Map(), scopeTypes: [], down: true, refused: true, declaredHooks: input.previous?.apps.get(entry.ins)?.declaredHooks ?? [] };
     }
-    let manifest = prevByDigest.get(entry.manifestDigest);
+    const accepted = acceptedDigests(entry);
+    // G2b: the previous-manifest cache is looked up by BOTH digests (the serving one and, mid-attempt, the candidate)
+    let digest = accepted.find((d) => prevByDigest.has(d));
+    let manifest = digest === undefined ? undefined : prevByDigest.get(digest);
     let down = false;
     if (!manifest) {
       try {
         const m = await input.fetchManifest(entry);
         const got = api.manifestDigest(m);
-        if (got !== entry.manifestDigest) throw Object.assign(new Error("manifest_mismatch"), { served: got });
+        if (!accepted.includes(got)) throw Object.assign(new Error("manifest_mismatch"), { served: got });
         manifest = m;
+        digest = got;
       } catch (e) {
         down = true;
         input.onManifestFailure?.(entry, e);
@@ -166,7 +190,7 @@ export async function buildTable(input: BuildInput): Promise<Table> {
     const ops = new Map<string, OperationView>();
     if (manifest) for (const op of api.withStandardOps(manifest)) ops.set(op.id, op);
     const declaredHooks = manifest ? (manifest.hooks ?? []) : (input.previous?.apps.get(entry.ins)?.declaredHooks ?? []);
-    return { entry, manifest, ops, scopeTypes: (manifest?.scopes ?? []).map((s) => s.type), down, declaredHooks };
+    return { entry, manifest, ...(manifest && digest !== undefined ? { digest } : {}), ops, scopeTypes: (manifest?.scopes ?? []).map((s) => s.type), down, declaredHooks };
   });
 
   const apps = new Map<InstanceId, AppRuntime>();
