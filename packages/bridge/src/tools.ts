@@ -123,7 +123,10 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         const omitKey = `${app.entry.ins}|${op.id}`;
         dynamic = true;
         try {
-          catalog = await router.catalog(app, op.id, agt);
+          const answer = await router.catalogFresh(app, op.id, agt);
+          catalog = answer.entries;
+          // C296: the last good entries stay listed while a refresh fails; the index is retried soon
+          if (answer.stale) incomplete = true;
           if (ctx.toolsOmitted.get(omitKey)?.code === "catalog_failed") ctx.toolsOmitted.delete(omitKey);
         } catch {
           // L3: the op's entries are missing — tell Core (status toolsOmitted), not only the log

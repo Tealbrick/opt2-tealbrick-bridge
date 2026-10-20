@@ -68,6 +68,8 @@ export class McpServer {
   /** insertion order = least recently used first (a touched session moves to the end) */
   private readonly sessions = new Map<string, Session>();
   private readonly indexCache = new Map<string, Promise<ToolIndex>>();
+  /** C296: keys whose background rebuild runs (one at a time per key) */
+  private readonly rebuilding = new Set<string>();
   private readonly limits: McpLimits;
   private readonly postBucket: TokenBucket;
   private readonly callsByCon = new Map<string, number>();
@@ -120,33 +122,39 @@ export class McpServer {
 
   private index(t: Table, agt: AgentId): Promise<ToolIndex> {
     const key = `${t.rev}|${agt}`;
-    let p = this.indexCache.get(key);
+    const p = this.indexCache.get(key);
     if (!p) {
-      p = buildToolIndex(this.ctx, this.router, t, agt);
-      this.indexCache.set(key, p);
-      p.catch(() => this.indexCache.delete(key));
-      return p;
+      const built = buildToolIndex(this.ctx, this.router, t, agt);
+      this.indexCache.set(key, built);
+      built.catch(() => this.indexCache.get(key) === built && this.indexCache.delete(key));
+      return built;
     }
     // C296 (INC-20261020-03): dynamic list entries come from the app at run time. Kept for the whole config revision, an
     // index built while the app had no engine yet (0 entries, or a failed catalog) hid the engine tools until the next
-    // revision. Rebuild a stale one; its sessions are told when the tool set changed (list_changed).
-    const previous = p;
-    const rebuilt = p.then((idx) => {
-      const current = this.indexCache.get(key);
-      if (current !== previous) return current ?? idx; // another caller already rebuilt it (or the table changed)
-      if (!this.isStale(idx)) return idx;
-      this.router.forgetCatalogs(agt);
-      const next = buildToolIndex(this.ctx, this.router, t, agt);
-      this.indexCache.set(key, next);
-      next.then((fresh) => this.toolsChanged(agt, fresh)).catch(() => this.indexCache.delete(key));
-      return next;
-    });
-    return rebuilt;
+    // revision. A stale index is still answered at once; ONE background rebuild replaces it and the agent's sessions get
+    // list_changed when the tool set changed. Only an idle client that never asks again hears nothing until it does.
+    void p.then((idx) => this.refresh(t, agt, key, p, idx)).catch(() => undefined);
+    return p;
   }
 
-  private isStale(idx: ToolIndex): boolean {
+  private refresh(t: Table, agt: AgentId, key: string, previous: Promise<ToolIndex>, idx: ToolIndex): void {
+    if (this.indexCache.get(key) !== previous || this.rebuilding.has(key)) return;
     const age = Date.now() - (idx.builtAt ?? 0);
-    return (idx.incomplete === true && age >= this.limits.incompleteIndexRetryMs) || (idx.dynamic === true && age >= this.limits.dynamicIndexTtlMs);
+    const expired = idx.dynamic === true && age >= this.limits.dynamicIndexTtlMs;
+    const retry = idx.incomplete === true && age >= this.limits.incompleteIndexRetryMs;
+    if (!expired && !retry) return;
+    // Past the TTL every catalog of this agent is asked again (a failed refresh keeps the last good answer); a retry after
+    // a failure asks only what is not cached (the failed catalog), never the healthy apps again.
+    if (expired) this.router.expireCatalogs(agt);
+    this.rebuilding.add(key);
+    buildToolIndex(this.ctx, this.router, t, agt)
+      .then((fresh) => {
+        if (this.indexCache.get(key) !== previous) return; // the table or the scopes changed meanwhile: that index wins
+        this.indexCache.set(key, Promise.resolve(fresh));
+        this.toolsChanged(agt, fresh);
+      })
+      .catch(() => undefined) // the previous index keeps serving; the next request tries again
+      .finally(() => this.rebuilding.delete(key));
   }
 
   /** C296: list_changed to this agent's sessions whose last listed tool set differs from the rebuilt index. */
