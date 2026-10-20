@@ -11,7 +11,7 @@ import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
-import type { CallRouter } from "./calls.ts";
+import { type CallRouter, RESOLVE_TTL_MS } from "./calls.ts";
 import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { authenticateAgent } from "./identity.ts";
 import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
@@ -49,6 +49,10 @@ export const MCP_LIMITS = Object.freeze({
   burst: 40,
   callsPerConnection: 8,
   callsGlobal: 256,
+  /** C296: a tool index with dynamic list entries is rebuilt after this (the app's catalog changes without a config revision) */
+  dynamicIndexTtlMs: RESOLVE_TTL_MS,
+  /** C296: an index built while a dynamic catalog failed is retried after this */
+  incompleteIndexRetryMs: 30_000,
 });
 
 export type McpLimits = { -readonly [K in keyof typeof MCP_LIMITS]: number };
@@ -121,8 +125,38 @@ export class McpServer {
       p = buildToolIndex(this.ctx, this.router, t, agt);
       this.indexCache.set(key, p);
       p.catch(() => this.indexCache.delete(key));
+      return p;
     }
-    return p;
+    // C296 (INC-20261020-03): dynamic list entries come from the app at run time. Kept for the whole config revision, an
+    // index built while the app had no engine yet (0 entries, or a failed catalog) hid the engine tools until the next
+    // revision. Rebuild a stale one; its sessions are told when the tool set changed (list_changed).
+    const previous = p;
+    const rebuilt = p.then((idx) => {
+      const current = this.indexCache.get(key);
+      if (current !== previous) return current ?? idx; // another caller already rebuilt it (or the table changed)
+      if (!this.isStale(idx)) return idx;
+      this.router.forgetCatalogs(agt);
+      const next = buildToolIndex(this.ctx, this.router, t, agt);
+      this.indexCache.set(key, next);
+      next.then((fresh) => this.toolsChanged(agt, fresh)).catch(() => this.indexCache.delete(key));
+      return next;
+    });
+    return rebuilt;
+  }
+
+  private isStale(idx: ToolIndex): boolean {
+    const age = Date.now() - (idx.builtAt ?? 0);
+    return (idx.incomplete === true && age >= this.limits.incompleteIndexRetryMs) || (idx.dynamic === true && age >= this.limits.dynamicIndexTtlMs);
+  }
+
+  /** C296: list_changed to this agent's sessions whose last listed tool set differs from the rebuilt index. */
+  private toolsChanged(agt: AgentId, idx: ToolIndex): void {
+    const td = this.ctx.api.digest(idx.tools.map((x) => x.name) as Json);
+    for (const s of this.sessions.values()) {
+      if (s.agt !== agt || !s.toolDigest || s.toolDigest === td) continue;
+      this.push(s, { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+      s.toolDigest = td;
+    }
   }
 
   /**

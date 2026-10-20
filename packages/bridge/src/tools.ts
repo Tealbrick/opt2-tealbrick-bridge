@@ -30,6 +30,12 @@ export interface ToolIndex {
   rev: number;
   tools: ToolDef[];
   routes: Map<string, ToolRoute>;
+  /** C296: when it was built (ms); an index with dynamic list entries goes stale (the app's catalog changes on its own) */
+  builtAt?: number;
+  /** C296: a dynamic list op was asked for its catalog while building */
+  dynamic?: boolean;
+  /** C296: a dynamic catalog failed while building (its entries are missing): retried soon, never kept for the revision */
+  incomplete?: boolean;
 }
 
 const NAME_RE = new RegExp(TOOL_NAME_RULE.pattern);
@@ -86,7 +92,9 @@ export function agentPausedOrEmpty(t: Table, agt: AgentId): boolean {
 export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: Table, agt: AgentId): Promise<ToolIndex> {
   const tools: ToolDef[] = [];
   const routes = new Map<string, ToolRoute>();
-  if (agentPausedOrEmpty(t, agt)) return { rev: t.rev, tools, routes };
+  if (agentPausedOrEmpty(t, agt)) return { rev: t.rev, tools, routes, builtAt: Date.now() };
+  let dynamic = false;
+  let incomplete = false;
   const prefix = `${agtRef(agt)}|`;
   const add = (app: AppRuntime, def: ToolDef, route: ToolRoute) => {
     if (def.name.length > TOOL_NAME_RULE.maxLength || !NAME_RE.test(def.name)) {
@@ -113,12 +121,14 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
       if (op.dynamic?.mode === "list") {
         let catalog: DynamicCatalogEntry[] = [];
         const omitKey = `${app.entry.ins}|${op.id}`;
+        dynamic = true;
         try {
           catalog = await router.catalog(app, op.id, agt);
           if (ctx.toolsOmitted.get(omitKey)?.code === "catalog_failed") ctx.toolsOmitted.delete(omitKey);
         } catch {
           // L3: the op's entries are missing — tell Core (status toolsOmitted), not only the log
           ctx.toolsOmitted.set(omitKey, { ins: app.entry.ins, name: op.id, code: "catalog_failed" });
+          incomplete = true;
           ctx.log.warn("bridge.catalog.failed", { ins: app.entry.ins, op: op.id, code: "dynamic_resolve_failed" });
         }
         const ceiling = EFFECTS.indexOf(op.dynamic.effectCeiling);
@@ -151,7 +161,7 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
     }
     add(app, { name: `${product}__${TOOL_NAME_RULE.skillsOp}`, title: "Skills", description: `How to use ${app.manifest?.name ?? product}. Without skillId: the skill index. With skillId: that skill's text.`, inputSchema: SKILLS_SCHEMA, annotations: { readOnlyHint: true } }, { kind: "skills", app });
   }
-  return { rev: t.rev, tools, routes };
+  return { rev: t.rev, tools, routes, builtAt: Date.now(), dynamic, incomplete };
 }
 
 /** Products the agent can reach (for skills resources). */

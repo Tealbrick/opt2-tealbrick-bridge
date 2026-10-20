@@ -45,7 +45,7 @@ export interface CallRequest {
 
 export type CallOutcome = OpResult<JsonValue>;
 
-const RESOLVE_TTL_MS = 5 * 60_000;
+export const RESOLVE_TTL_MS = 5 * 60_000;
 const APP_TIMEOUT_MS = 30_000;
 /** F57a: message of a call cut off at the drain bound (it may have run: the caller checks before retrying) */
 const CUT_OFF = "the bridge restarted while this call ran; its outcome is unknown, check before retrying";
@@ -246,6 +246,12 @@ export class CallRouter {
    * C283 A1 (spec 0.1.50): the body carries `agent`, so the SDK can mark the entries that agent's owner rows admit
    * (`admitted: "owner"`). The marks differ per agent, so the cache is per agent too. Not bound by the bridge-op proof.
    */
+  /** C296: a stale tool index is rebuilt from fresh catalogs (the cached ones may be the stale answer). */
+  forgetCatalogs(agent?: AgentId): void {
+    if (!agent) return this.catalogCache.clear();
+    for (const key of this.catalogCache.keys()) if (key.endsWith(`|${agent}`)) this.catalogCache.delete(key);
+  }
+
   async catalog(app: AppRuntime, op: string, agent: AgentId): Promise<DynamicCatalogEntry[]> {
     const key = `${app.entry.ins}|${op}|${agent}`;
     const hit = this.catalogCache.get(key);
