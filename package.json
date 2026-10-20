@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check . && node scripts/check-literals.ts && node scripts/agent-side-gate.ts",
-    "test": "node scripts/agent-side-gate.ts && tsc -p packages/bridge/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\" \"scripts/test/**/*.test.ts\"",
+    "test": "node scripts/agent-side-gate.ts && tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\" \"scripts/test/**/*.test.ts\"",
     "conformance": "npm run build && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts && node scripts/conformance.ts",
     "build": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json"
   },

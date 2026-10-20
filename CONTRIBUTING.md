@@ -31,11 +31,11 @@ This file is the short version. The full engineering practice is in the Tealbric
 ```sh
 pnpm typecheck
 pnpm lint          # biome + check-literals + agent-side-gate
-pnpm test          # agent-side-gate, builds, then node --test over packages/*/test and scripts/test
+pnpm test          # agent-side-gate, builds bridge and bridge-server (the bridge-server tests need its dist), then node --test over packages/*/test and scripts/test
 pnpm conformance   # tb-conformance bridge against the real build; waivers: none
 ```
 
-Recorded at last check (bridge 0.2.5, conformance 0.1.27): 409 tests pass, 0 fail, 0 skipped; conformance bridge target 252 pass, 2 not applicable, 0 fail, 0 waivers (B5.gate_scoped_above_grant runs because the bridge reports `owner_rows`; the relay target runs in the CLI repo).
+Recorded at last check (bridge 0.2.5, conformance 0.1.27): 414 tests pass, 0 fail, 0 skipped; conformance bridge target 252 pass, 2 not applicable, 0 fail, 0 waivers (B5.gate_scoped_above_grant runs because the bridge reports `owner_rows`; the relay target runs in the CLI repo).
 
 ## Releasing
 
