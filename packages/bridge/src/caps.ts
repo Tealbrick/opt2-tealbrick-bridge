@@ -1,0 +1,19 @@
+/**
+ * Bridge capabilities (spec 0.1.54, C292): what THIS build implements, reported in every StatusReport as
+ * `bridge.caps`. Core copies the set into the slices it signs (`slice.bridge.caps`), the SDK passes it to the app as
+ * `ctx.bridgeCaps()`, and a standalone bridge writes it into the slices it re-mints itself (standalone.ts). Apps decide
+ * by capability, never by bridge version. Caps are ADVISORY: they never widen access (the SDK authorizes every call).
+ *
+ * RULE: a cap is listed here ONLY together with the code path it names, in the same change. Never list one ahead of its
+ * code, and remove it when the code goes (a bridge that declares a cap it lacks makes apps show a feature that does not
+ * work). `test/caps.test.ts` keeps a probe for every entry: it fails when the probe's behaviour is missing, and when an
+ * entry has no probe.
+ *
+ *  - `owner_rows` = the C283 A1 owner-row filter (SDK-API v0.1.50): tools/list lists a scoped static op above grant.crud
+ *    that the app's scope summary names in `admittedOps` (tools.ts `visibleOps`, internal.ts `refreshScopeSummary`); the
+ *    dynamic catalog body carries `agent` and an entry marked `admitted: "owner"` is listed (calls.ts `catalog`, tools.ts
+ *    `buildToolIndex`); and gate() is the manifest >= 0.1.27 gate that skips `op.crud ⊆ grant.crud` for scoped ops.
+ */
+import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
+
+export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows"];
