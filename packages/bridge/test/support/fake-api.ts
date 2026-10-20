@@ -80,7 +80,8 @@ export function fakeApi(): ManifestApi {
       const g = api.verifyGrant(input.grant, input.trust);
       if (!g.ok) return { decision: "refuse", reason: g.code };
       if (input.op.standard && input.op.id === "tb.hold_status") return { decision: "pass", reason: "ok" };
-      if (!input.op.crud.every((c) => g.claims.crud.includes(c))) return { decision: "refuse", reason: "crud_exceeds_grant" };
+      // manifest 0.1.27 (C283 A1): an op WITH a scopeType skips the crud ceiling here (the SDK enforces it); unscoped and standard ops keep it
+      if ((input.op.standard || !input.op.scopeType) && !input.op.crud.every((c) => g.claims.crud.includes(c))) return { decision: "refuse", reason: "crud_exceeds_grant" };
       if (input.op.audience !== "agent") return { decision: "refuse", reason: "audience_not_agent" };
       if (!input.op.standard && input.op.scopeType && !input.declaredScopeTypes.includes(input.op.scopeType)) return { decision: "refuse", reason: "scope_type_unknown" };
       if (!realManifest.opInGrantWorkflow(g.claims, input.op.id, input.op.standard ? undefined : input.op.listing)) return { decision: "refuse", reason: "not_in_workflow" };
