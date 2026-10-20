@@ -7,9 +7,10 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { CallRouter } from "../src/calls.ts";
 import { freePort, type RealSdkApp, startRealSdkApp } from "./support/sdk-app.ts";
-import { makeWorld, type World } from "./support/world.ts";
+import { AGT, makeWorld, type World } from "./support/world.ts";
 
 const SDKINS = "ins_01HSDKAPPSDKAPPSDKAPPSDKAP";
+const AGENT = AGT as `agt_${string}`;
 
 const dyn = (id: string, mode: "list" | "search") => ({
   id,
@@ -60,12 +61,12 @@ describe("C91 live: real bridge → real SDK app bridge ops", () => {
     const app = w.bridge.ctx.table?.apps.get(SDKINS as never);
     assert.ok(app?.manifest, "the bridge fetched the real app's manifest");
     const r = new CallRouter(w.bridge.ctx);
-    const list = await r.catalog(app, "catalog_all");
+    const list = await r.catalog(app, "catalog_all", AGENT);
     assert.deepEqual(
       list.map((e) => e.name),
       ["gmail_list"],
     );
-    const found = await r.search(app, "lookup", "gmail list messages", 5);
+    const found = await r.search(app, "lookup", "gmail list messages", 5, AGENT);
     assert.equal(found[0]?.name, "gmail_list");
     assert.deepEqual(searches.at(-1), { query: "gmail list messages", limit: 5 }, "the search query reaches the app");
     const resolved = await r.bridgeOp<{ tool: string; effect: string }>(app, "resolve", { op: "lookup", tool: "gmail_list" });

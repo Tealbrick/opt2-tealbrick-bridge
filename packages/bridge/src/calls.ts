@@ -14,7 +14,7 @@ import type {
   JsonValue,
   OpResult,
 } from "@opt2-tealbrick/spec/bridge";
-import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeContext } from "./context.ts";
@@ -173,6 +173,10 @@ export class CallRouter {
     ctx.on("table", () => {
       this.catalogCache.clear();
     });
+    // C283 A1: `admitted` marks follow the app's owner rows, which changed
+    ctx.on("scopes", () => {
+      this.catalogCache.clear();
+    });
   }
 
   /**
@@ -238,18 +242,22 @@ export class CallRouter {
     }
   }
 
-  async catalog(app: AppRuntime, op: string): Promise<DynamicCatalogEntry[]> {
-    const key = `${app.entry.ins}|${op}`;
+  /**
+   * C283 A1 (spec 0.1.50): the body carries `agent`, so the SDK can mark the entries that agent's owner rows admit
+   * (`admitted: "owner"`). The marks differ per agent, so the cache is per agent too. Not bound by the bridge-op proof.
+   */
+  async catalog(app: AppRuntime, op: string, agent: AgentId): Promise<DynamicCatalogEntry[]> {
+    const key = `${app.entry.ins}|${op}|${agent}`;
     const hit = this.catalogCache.get(key);
     if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.entries;
-    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op });
+    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, agent });
     const list = Array.isArray(entries) ? entries.slice(0, 256) : [];
     this.catalogCache.set(key, { at: Date.now(), entries: list });
     return list;
   }
 
-  async search(app: AppRuntime, op: string, query: string, limit?: number): Promise<DynamicCatalogEntry[]> {
-    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, query, ...(limit ? { limit } : {}) });
+  async search(app: AppRuntime, op: string, query: string, limit: number | undefined, agent: AgentId): Promise<DynamicCatalogEntry[]> {
+    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, query, ...(limit ? { limit } : {}), agent });
     return Array.isArray(entries) ? entries.slice(0, MAX_SEARCH_RESULTS) : [];
   }
 
@@ -377,6 +385,10 @@ export class CallRouter {
     if (!id) throw new BridgeError("hook_failed", 503);
     const now = nowS();
     const context = (request.context ?? {}) as Json;
+    // C268 B / C268c: serialise ONCE, hash those bytes, send those bytes. `bd` only when the app's stored capability set
+    // (its claim, then its status pushes) lists "bd"; never inferred from a version, never dropped by a failed call.
+    const bytes = Buffer.from(JSON.stringify(request), "utf8");
+    const bd = this.ctx.proofCaps.hasBd(h.ins) ? this.ctx.api.sha256Bytes(bytes) : undefined;
     const proof = await this.ctx.api.signJws(
       TYP.callProof,
       {
@@ -391,13 +403,16 @@ export class CallRouter {
         phase: h.phase,
         ctx: this.ctx.api.digest(context),
         ...(input !== undefined ? { in: this.ctx.api.digest(input) } : {}),
+        ...(bd ? { bd } : {}),
       },
       id.key,
     );
+    // a refusal (401 included), a timeout or a connect failure ends this hook call as `hook_failed`: there is no second try,
+    // with or without `bd`, and the stored capability is not touched (C268c)
     const res = await this.ctx.fetch(new URL(`/tb/v1/hooks/${h.hookId}`, app.entry.internalUrl), {
       method: "POST",
       headers: { "content-type": "application/json", "TB-Call": proof },
-      body: JSON.stringify(request),
+      body: bytes,
       redirect: "error",
       signal: AbortSignal.timeout(Math.min(Math.max(h.timeoutMs, 100), 2_000)),
     });

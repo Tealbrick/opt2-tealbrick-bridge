@@ -82,7 +82,8 @@ export const hookManifest = {
 
 export interface AppLog {
   ops: { op: string; auth: string | undefined; proof: string | undefined; body: Record<string, unknown> }[];
-  hooks: { hook: string; body: Record<string, unknown> }[];
+  /** every hook request the guard app received: the parsed body, the EXACT bytes and the `TB-Call` proof */
+  hooks: { hook: string; body: Record<string, unknown>; raw: Buffer; proof: string | undefined }[];
 }
 
 export interface World {
@@ -99,7 +100,7 @@ export interface World {
   signRaw(input: string): Promise<string>;
   acks: StatusReport[];
   appLog: AppLog;
-  hookMode: { mode: "allow" | "deny" | "fail"; answer?: (hook: string, body: Record<string, unknown>) => unknown | Promise<unknown> };
+  hookMode: { mode: "allow" | "deny" | "fail"; /** answer every hook request with this HTTP status and no body (a 401 test) */ status?: number; answer?: (hook: string, body: Record<string, unknown>) => unknown | Promise<unknown> };
   /** publish a new config revision (tweak: mutate THIS revision only) */
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   /** change the base config for every later revision (what Core keeps listing), then publish */
@@ -152,6 +153,11 @@ export interface World {
   viewer: { seen: { url: string; headers: IncomingHttpHeaders }[]; handler?: (req: IncomingMessage, res: ServerResponse) => void };
   /** test hook in the fake app's op route: return true when it answered the request itself */
   appOps: { override?: (op: string, body: Record<string, unknown>, res: ServerResponse) => boolean };
+  /**
+   * the fake app's bridge-op route (`/tb/v1/bridge/<catalog|resolve|mark|scope-summary>`): every body it received (with the
+   * TB-Call proof) and the handler that answers (`[]` when none)
+   */
+  bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown; /** answer every bridge op with this HTTP status and no body */ status?: number };
 }
 
 export interface WorldOptions {
@@ -208,6 +214,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode: World["hookMode"] = { mode: "allow" };
   const appOps: World["appOps"] = {};
+  const bridgeOps: World["bridgeOps"] = { seen: [] };
   const viewer: World["viewer"] = { seen: [] };
   let down = false;
   let pulls = 0;
@@ -262,8 +269,12 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "ok", output: { op, secret: "s3cret", items: [1, 2] } }));
     }
     if (url.pathname.startsWith("/tb/v1/bridge/")) {
-      await body(req);
-      return res.writeHead(200, { "content-type": "application/json" }).end("[]");
+      const b = await body(req);
+      const path = url.pathname.slice(14);
+      bridgeOps.seen.push({ path, body: b, proof: req.headers["tb-call"] as string | undefined });
+      if (bridgeOps.status !== undefined) return res.writeHead(bridgeOps.status).end();
+      const custom = bridgeOps.answer?.(path, b);
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom !== undefined ? custom : []));
     }
     if (url.pathname.startsWith("/v/notes/")) {
       viewer.seen.push({ url: req.url ?? "", headers: req.headers });
@@ -287,8 +298,12 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     const url = new URL(req.url ?? "/", "http://x");
     if (url.pathname === "/tb/v1/manifest") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(hookManifest));
     if (url.pathname.startsWith("/tb/v1/hooks/")) {
-      const b = await body(req);
-      appLog.hooks.push({ hook: url.pathname.slice(13), body: b });
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks);
+      const b = raw.length ? JSON.parse(raw.toString("utf8")) : undefined;
+      appLog.hooks.push({ hook: url.pathname.slice(13), body: b, raw, proof: req.headers["tb-call"] as string | undefined });
+      if (hookMode.status !== undefined) return res.writeHead(hookMode.status).end();
       if (hookMode.mode === "fail") return res.writeHead(500).end();
       const custom = await hookMode.answer?.(url.pathname.slice(13), b);
       if (custom !== undefined) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom));
@@ -486,6 +501,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     agentToken,
     agentTokenFor,
     appOps,
+    bridgeOps,
     viewer,
     publicRequests: (path) => seen.get(path) ?? 0,
     mcp,

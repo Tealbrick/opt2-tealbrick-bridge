@@ -9,22 +9,22 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check . && node scripts/check-literals.ts && node scripts/agent-side-gate.ts",
-    "test": "node scripts/agent-side-gate.ts && tsc -p packages/bridge/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\" \"scripts/test/**/*.test.ts\"",
+    "test": "node scripts/agent-side-gate.ts && tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\" \"scripts/test/**/*.test.ts\"",
     "conformance": "npm run build && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts && node scripts/conformance.ts",
     "build": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@opt2-tealbrick/conformance": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-conformance-v0.1.17/opt2-tealbrick-conformance-0.1.17.tgz",
-    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.26/opt2-tealbrick-miniapp-sdk-0.1.26.tgz",
+    "@opt2-tealbrick/conformance": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-conformance-v0.1.27/opt2-tealbrick-conformance-0.1.27.tgz",
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.37/opt2-tealbrick-miniapp-sdk-0.1.37.tgz",
     "@types/node": "24.19.2",
     "fast-check": "4",
     "typescript": "5.9.3"
   },
   "pnpm": {
     "overrides": {
-      "@opt2-tealbrick/relay>@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.23/opt2-tealbrick-manifest-0.1.23.tgz",
-      "@opt2-tealbrick/relay>@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.51/opt2-tealbrick-spec-0.1.51.tgz"
+      "@opt2-tealbrick/relay>@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.29/opt2-tealbrick-manifest-0.1.29.tgz",
+      "@opt2-tealbrick/relay>@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.54/opt2-tealbrick-spec-0.1.54.tgz"
     }
   }
 }

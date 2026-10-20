@@ -8,13 +8,14 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { MCP_VERSIONS, tooDeep, validRpcId } from "@opt2-tealbrick/relay";
 import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec/bridge";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
-import type { AgentId, ConnectionId } from "@opt2-tealbrick/spec/credentials";
+import type { AgentId, ConnectionId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { authenticateAgent } from "./identity.ts";
-import type { Table } from "./table.ts";
+import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
+import { agtRef, grantKey, insRef, type Table } from "./table.ts";
 import { agentPausedOrEmpty, buildToolIndex, grantedProducts, type ToolIndex, type ToolRoute } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, readBody, sendError, sendJson, TokenBucket } from "./util.ts";
 
@@ -78,6 +79,11 @@ export class McpServer {
       this.indexCache.clear();
       void this.notifyChanges();
     });
+    // C283 A1: the app's scope summary (`admittedOps`) changed → the tool lists are rebuilt and sessions told
+    ctx.on("scopes", () => {
+      this.indexCache.clear();
+      void this.notifyChanges();
+    });
     ctx.on("connection-revoked", (con: string) => {
       for (const [id, s] of this.sessions) if (s.con === con) this.endSession(id);
     });
@@ -117,6 +123,35 @@ export class McpServer {
       p.catch(() => this.indexCache.delete(key));
     }
     return p;
+  }
+
+  /**
+   * C283 A1: asks the apps this agent has a grant to for their scope summary when the last answer is older than `maxAgeMs`
+   * (display input for the tool list; scope-summary.ts). A changed `admittedOps` rebuilds the tool lists (event `scopes`).
+   */
+  private async refreshSummaries(t: Table, agt: AgentId, maxAgeMs: number): Promise<void> {
+    if (agentPausedOrEmpty(t, agt)) return;
+    const prefix = `${agtRef(agt)}|`;
+    const ins = new Set<InstanceId>();
+    for (const [k, g] of t.grants) if (k.startsWith(prefix)) ins.add(g.claims.aud.slice(7) as InstanceId);
+    await Promise.all([...ins].filter((i) => { const a = t.apps.get(i); return a && !a.down; }).map((i) => refreshScopeSummaryIfOlder(this.ctx, this.router, i, maxAgeMs)));
+  }
+
+  /**
+   * C283 A1: a tools/call named a tool the list does not show. When it names a STATIC scoped op of an app this agent has a grant
+   * to, the app's scope summary is asked again (at most every {@link MISS_MIN_AGE_MS} per app, so an agent cannot make the bridge
+   * hammer an app) and the caller looks the tool up once more. Other unknown names never cause a request. true = asked or an
+   * answer younger than the bound exists.
+   */
+  private async refreshOnMiss(t: Table, agt: AgentId, name: string): Promise<boolean> {
+    const at = name.indexOf("__");
+    if (at < 1) return false;
+    const app = t.appsByProduct.get(name.slice(0, at));
+    const op = app?.ops.get(name.slice(at + 2));
+    if (!app || app.down || !op || op.standard || op.scopeType === undefined || op.dynamic) return false;
+    if (!t.grants.has(grantKey(agtRef(agt), insRef(app.entry.ins)))) return false;
+    await refreshScopeSummaryIfOlder(this.ctx, this.router, app.entry.ins, MISS_MIN_AGE_MS);
+    return true;
   }
 
   private skillsFor(t: Table, agt: AgentId) {
@@ -320,7 +355,8 @@ export class McpServer {
       case "ping":
         return {};
       case "tools/list": {
-        const idx = await this.index(t, p.agt);
+        await this.refreshSummaries(t, p.agt, LIST_MAX_AGE_MS);
+        const idx = await this.index(this.ctx.table ?? t, p.agt);
         s.toolDigest = this.ctx.api.digest(idx.tools.map((x) => x.name) as Json);
         return { tools: idx.tools };
       }
@@ -371,8 +407,13 @@ export class McpServer {
     try {
       // pause is gate step 1: a paused agent or workspace is told `paused`, not that the tool is unknown
       if (t.pausedWorkspace || t.pausedAgents.has(p.agt)) throw new BridgeError("paused", 403, "paused by the owner");
-      const idx = await this.index(t, p.agt);
-      const route = idx.routes.get(name);
+      let idx = await this.index(t, p.agt);
+      let route = idx.routes.get(name);
+      if (!route && (await this.refreshOnMiss(t, p.agt, name))) {
+        // C283 A1: the owner may have just widened a row; the app's scope summary was asked again and the tool is now listed
+        idx = await this.index(this.ctx.table ?? t, p.agt);
+        route = idx.routes.get(name);
+      }
       if (!route) {
         // a tool of an app that is temporarily unavailable (restart, update) is not "unknown" (C57)
         const app = t.appsByProduct.get(name.split("__")[0] ?? "");
@@ -412,8 +453,9 @@ export class McpServer {
       if (!query) throw new BridgeError("input_invalid", 400, "query required");
       const limit = isRecord(args) && typeof args.limit === "number" ? Math.min(Math.max(1, Math.floor(args.limit)), 50) : undefined;
       const grant = [...t.grants.values()].find((g) => g.claims.sub === `tb:agt:${p.agt}` && g.claims.aud === `tb:ins:${route.app.entry.ins}`);
-      const entries = await this.router.search(route.app, route.op.id, query, limit);
-      const visible = entries.filter((e) => grant && e.crud.every((c) => grant.claims.crud.includes(c)));
+      const entries = await this.router.search(route.app, route.op.id, query, limit, p.agt);
+      // C283 A1: an entry the SDK marked `admitted: "owner"` for this agent is shown above grant.crud (display only)
+      const visible = entries.filter((e) => grant && ((e.admitted === "owner" && !route.op.standard && route.op.scopeType !== undefined) || e.crud.every((c) => grant.claims.crud.includes(c))));
       return toolOk({ tools: visible.map((e) => ({ tool: e.name, title: e.title, description: e.description, inputSchema: e.inputSchema as Json, effect: e.effect })) });
     }
     let input: Json = args;

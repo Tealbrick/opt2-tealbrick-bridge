@@ -4,7 +4,7 @@
  */
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, GrantClaims } from "@opt2-tealbrick/spec/credentials";
-import { type DynamicCatalogEntry, EFFECTS, type JsonSchemaObject } from "@opt2-tealbrick/spec/manifest";
+import { CRUD_ACTIONS, type DynamicCatalogEntry, EFFECTS, type JsonSchemaObject } from "@opt2-tealbrick/spec/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import type { BridgeContext } from "./context.ts";
@@ -62,12 +62,19 @@ const subset = (a: readonly string[], b: readonly string[]) => a.every((x) => b.
 /**
  * Visible ops of one app for one grant: manifest 0.1.14 `opVisibleToGrant` (the static part of gate() steps 3–4,
  * L1 — no local copy). Standard ops are added per product separately.
+ *
+ * C283 A1 (spec 0.1.50, manifest 0.1.27): `opVisibleToGrant` stays the narrower side of `gate()`. A STATIC op with a
+ * `scopeType` that is above `grant.crud` is also listed when the app's `scope_summary` answer names it in `admittedOps`
+ * for this agent (`admitted`), provided every OTHER listing rule holds: the same function is asked with the grant's crud
+ * widened to all actions, so audience, declared scope type and workflow are never copied here. DISPLAY only: the SDK
+ * authorizes every call with the app's own access (`authority = owner`) or refuses `scope_denied`.
  */
-export function visibleOps(ctx: Pick<BridgeContext, "api">, app: AppRuntime, grant: GrantClaims): OperationView[] {
+export function visibleOps(ctx: Pick<BridgeContext, "api">, app: AppRuntime, grant: GrantClaims, admitted?: ReadonlySet<string>): OperationView[] {
   const out: OperationView[] = [];
   for (const op of app.ops.values()) {
     if (op.standard) continue; // tb.hold_status / tb.holds_pending are added per product separately
     if (ctx.api.opVisibleToGrant(op, grant, app.scopeTypes)) out.push(op);
+    else if (admitted?.has(op.id) && op.scopeType !== undefined && !op.dynamic && ctx.api.opVisibleToGrant(op, { mode: grant.mode, wf: grant.wf, crud: CRUD_ACTIONS }, app.scopeTypes)) out.push(op);
   }
   return out;
 }
@@ -99,7 +106,7 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
     const app = [...t.apps.values()].find((a) => a.entry.ins === ins);
     if (!app || app.down || t.pausedInstances.has(app.entry.ins)) continue;
     const product = app.entry.product;
-    const ops = visibleOps(ctx, app, g.claims);
+    const ops = visibleOps(ctx, app, g.claims, ctx.admittedOps.get(`${agt}|${ins}`));
     let any = false;
     for (const op of ops) {
       if (op.standard) continue;
@@ -107,7 +114,7 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         let catalog: DynamicCatalogEntry[] = [];
         const omitKey = `${app.entry.ins}|${op.id}`;
         try {
-          catalog = await router.catalog(app, op.id);
+          catalog = await router.catalog(app, op.id, agt);
           if (ctx.toolsOmitted.get(omitKey)?.code === "catalog_failed") ctx.toolsOmitted.delete(omitKey);
         } catch {
           // L3: the op's entries are missing — tell Core (status toolsOmitted), not only the log
@@ -116,7 +123,10 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         }
         const ceiling = EFFECTS.indexOf(op.dynamic.effectCeiling);
         for (const e of catalog) {
-          if (!subset(e.crud, g.claims.crud) || !subset(e.crud, op.dynamic.crudCeiling) || EFFECTS.indexOf(e.effect) > ceiling) {
+          // C283 A1: an entry the SDK marked `admitted: "owner"` for this agent is listed above grant.crud (display only) when the
+          // dynamic op has a scopeType (the SDK marks only those; as the static branch, never trust the mark otherwise); the op's
+          // own ceilings still hold, and the SDK authorizes the call
+          if (!(subset(e.crud, g.claims.crud) || (e.admitted === "owner" && op.scopeType !== undefined)) || !subset(e.crud, op.dynamic.crudCeiling) || EFFECTS.indexOf(e.effect) > ceiling) {
             ctx.toolsOmitted.set(`${app.entry.ins}|${e.name}`, { ins: app.entry.ins, name: e.name, code: "ceiling" });
             continue;
           }

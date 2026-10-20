@@ -10,6 +10,7 @@ import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
+import { ProofCaps } from "./proof-caps.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -83,7 +84,18 @@ export class BridgeContext extends EventEmitter {
   /** last successful config pull (epoch s) */
   lastPull = 0;
   readonly health = new Map<InstanceId, AppHealth>();
+  /** C268c: which hook apps accept `bd` in the call proof (proof-caps.ts) */
+  readonly proofCaps = new ProofCaps();
   readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
+  /** when each app instance was last asked for its scope summary (ms), and the request in flight (scope-summary.ts) */
+  readonly scopeSummaryAt = new Map<InstanceId, number>();
+  readonly scopeSummaryRuns = new Map<InstanceId, Promise<void>>();
+  /**
+   * C283 A1 (spec 0.1.50): `ScopeSummaryResult.admittedOps` per `<agt>|<ins>` as the app last answered it: the STATIC scoped
+   * ops an owner-set primary row admits, possibly above the Portal grant. DISPLAY only (tools/list); the SDK authorizes every
+   * call. Never part of the StatusReport. A change emits `scopes` (tool index and catalog caches are dropped).
+   */
+  readonly admittedOps = new Map<string, ReadonlySet<string>>();
   readonly rejected = new Map<string, number>();
   /** v0.1.14: connection → last authentication (ms) since the previous accepted status report (insertion = recency) */
   readonly connectionsSeen = new Map<string, number>();
@@ -93,6 +105,11 @@ export class BridgeContext extends EventEmitter {
     this.connectionsSeen.set(con, nowMs);
     if (this.connectionsSeen.size > 500) this.connectionsSeen.delete(this.connectionsSeen.keys().next().value as string);
   }
+  /**
+   * Keyed by instance + tool name, so it is per INSTANCE, not per agent (S4-3): an entry omitted for one agent (a catalog entry above
+   * its grant) is reported as omitted for the app, whichever agent hit it, and stays until the same key is set again or the
+   * catalog of that op works again. It is a hint for Core's status page, not an access decision.
+   */
   readonly toolsOmitted = new Map<string, { ins: InstanceId; name: string; code: "tool_name_too_long" | "name_collision" | "ceiling" | "catalog_failed" }>();
 
   constructor(o: BridgeOptions) {
@@ -167,6 +184,8 @@ export class BridgeContext extends EventEmitter {
   swapTable(next: Table): void {
     const prev = this.table;
     this.table = next;
+    // C268c: a config change of an app's digest, version or update candidate drops its hook proof capabilities, before any call uses the new table
+    this.proofCaps.onTable(next, prev);
     this.emit("table", next, prev);
   }
 }

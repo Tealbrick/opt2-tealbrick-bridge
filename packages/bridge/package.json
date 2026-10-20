@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/bridge",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Bridge core (the deployed form). Never runs agents or calls models. The agent side is @opt2-tealbrick/relay.",
@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@opt2-tealbrick/relay": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
-    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.51/opt2-tealbrick-spec-0.1.51.tgz",
-    "@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.23/opt2-tealbrick-manifest-0.1.23.tgz"
+    "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.54/opt2-tealbrick-spec-0.1.54.tgz",
+    "@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.29/opt2-tealbrick-manifest-0.1.29.tgz"
   }
 }

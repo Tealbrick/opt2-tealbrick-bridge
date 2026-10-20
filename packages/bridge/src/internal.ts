@@ -12,18 +12,23 @@ import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
+import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
 interface InstanceCaller {
+  /** `iat` of the verified instance assertion (epoch s) */
+  iat: number;
   ins: InstanceId;
   svc: string | undefined;
 }
 
 /** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
+
+const pauseSignature = (t: Table): string => `${t.pausedWorkspace}|${[...t.pausedAgents].sort().join(",")}|${[...t.pausedInstances].sort().join(",")}`;
 
 export class InternalApi {
   private readonly ctx: BridgeContext;
@@ -39,7 +44,13 @@ export class InternalApi {
     this.ctx = ctx;
     this.router = router;
     this.views = views;
-    ctx.on("table", () => this.wake());
+    ctx.on("table", (next: Table | undefined, prev: Table | undefined) => {
+      this.wake();
+      // C283 A1: the SDK gives its display marks (`admittedOps`, `admitted`) only to an agent that is not paused, and a pause
+      // does not change `scopesRev`. When a pause is lifted the marks are asked for again, so a resumed agent does not keep
+      // the empty answer it got while paused.
+      if (next && prev && next !== prev && pauseSignature(next) !== pauseSignature(prev)) for (const a of next.apps.values()) void refreshScopeSummary(ctx, router, a.entry.ins, true);
+    });
     ctx.on("keys", () => this.wake());
   }
 
@@ -79,7 +90,7 @@ export class InternalApi {
     const replayKey = `${v.header.kid}|${v.claims.jti}`;
     if (this.seenJtis.has(replayKey) || this.ctx.proofBeforeBoot(v.claims.iat, now)) throw new BridgeError("unauthenticated", 401);
     this.seenJtis.set(replayKey, v.claims.exp + 30);
-    return { ins, svc };
+    return { ins, svc, iat: v.claims.iat };
   }
 
   private keysFor(ins: InstanceId, svc: string | undefined): KeySet | undefined {
@@ -206,6 +217,8 @@ export class InternalApi {
       ctx.state.claims.splice(ctx.state.claims.indexOf(record), 1);
       throw e;
     }
+    // C268c: an APP-INSTANCE claim sets the hook proof capabilities (the claim's set); a companion service claim never does
+    if (!service) ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
     sendJson(res, 200, out);
@@ -221,7 +234,11 @@ export class InternalApi {
     if (!caller.svc) {
       const prev = ctx.health.get(caller.ins);
       ctx.health.set(caller.ins, { status: body, lastSeen: nowS() });
-      if (!prev || prev.status.scopesRev !== body.scopesRev) void this.refreshScopeSummary(caller.ins);
+      // C268c: an authenticated push of the app instance (a service push never gets here) states its proof capabilities
+      // S3-1: only a push of the version the config names (serving or update candidate) and not older than the last accepted one
+      const entry = ctx.table?.apps.get(caller.ins)?.entry;
+      ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims, caller.iat, entry ? [entry.version, entry.candidateVersion] : []);
+      if (!prev || prev.status.scopesRev !== body.scopesRev) void refreshScopeSummary(this.ctx, this.router, caller.ins, true);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
       // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)
       const upgradeChanged = JSON.stringify(upgradeFields(prev?.status)) !== JSON.stringify(upgradeFields(body));
@@ -265,22 +282,6 @@ export class InternalApi {
       this.waiters.add(check);
       req.on("close", finish);
     });
-  }
-
-  private async refreshScopeSummary(ins: InstanceId): Promise<void> {
-    const app = this.ctx.table?.apps.get(ins);
-    if (!app || this.paused(ins)) return;
-    try {
-      const list = await this.router.bridgeOp<{ agent: `agt_${string}`; label: string }[]>(app, "scope_summary", {});
-      for (const k of [...this.ctx.scopeSummaries.keys()]) if (k.endsWith(`|${ins}`)) this.ctx.scopeSummaries.delete(k);
-      for (const s of Array.isArray(list) ? list : []) {
-        if (typeof s?.agent !== "string" || typeof s.label !== "string") continue;
-        this.ctx.scopeSummaries.set(`${s.agent}|${ins}`, { agt: s.agent, ins, label: s.label.slice(0, 80) });
-      }
-      this.ctx.emit("health");
-    } catch {
-      this.ctx.log.warn("bridge.scope_summary.failed", { ins, code: "app_error" });
-    }
   }
 
   // ── §9.4 key fetch ──
