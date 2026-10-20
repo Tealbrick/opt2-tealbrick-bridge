@@ -84,6 +84,15 @@ export class BridgeContext extends EventEmitter {
   lastPull = 0;
   readonly health = new Map<InstanceId, AppHealth>();
   readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
+  /** when each app instance was last asked for its scope summary (ms), and the request in flight (scope-summary.ts) */
+  readonly scopeSummaryAt = new Map<InstanceId, number>();
+  readonly scopeSummaryRuns = new Map<InstanceId, Promise<void>>();
+  /**
+   * C283 A1 (spec 0.1.50): `ScopeSummaryResult.admittedOps` per `<agt>|<ins>` as the app last answered it: the STATIC scoped
+   * ops an owner-set primary row admits, possibly above the Portal grant. DISPLAY only (tools/list); the SDK authorizes every
+   * call. Never part of the StatusReport. A change emits `scopes` (tool index and catalog caches are dropped).
+   */
+  readonly admittedOps = new Map<string, ReadonlySet<string>>();
   readonly rejected = new Map<string, number>();
   /** v0.1.14: connection → last authentication (ms) since the previous accepted status report (insertion = recency) */
   readonly connectionsSeen = new Map<string, number>();

@@ -152,6 +152,11 @@ export interface World {
   viewer: { seen: { url: string; headers: IncomingHttpHeaders }[]; handler?: (req: IncomingMessage, res: ServerResponse) => void };
   /** test hook in the fake app's op route: return true when it answered the request itself */
   appOps: { override?: (op: string, body: Record<string, unknown>, res: ServerResponse) => boolean };
+  /**
+   * the fake app's bridge-op route (`/tb/v1/bridge/<catalog|resolve|mark|scope-summary>`): every body it received (with the
+   * TB-Call proof) and the handler that answers (`[]` when none)
+   */
+  bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown };
 }
 
 export interface WorldOptions {
@@ -208,6 +213,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode: World["hookMode"] = { mode: "allow" };
   const appOps: World["appOps"] = {};
+  const bridgeOps: World["bridgeOps"] = { seen: [] };
   const viewer: World["viewer"] = { seen: [] };
   let down = false;
   let pulls = 0;
@@ -262,8 +268,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "ok", output: { op, secret: "s3cret", items: [1, 2] } }));
     }
     if (url.pathname.startsWith("/tb/v1/bridge/")) {
-      await body(req);
-      return res.writeHead(200, { "content-type": "application/json" }).end("[]");
+      const b = await body(req);
+      const path = url.pathname.slice(14);
+      bridgeOps.seen.push({ path, body: b, proof: req.headers["tb-call"] as string | undefined });
+      const custom = bridgeOps.answer?.(path, b);
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom !== undefined ? custom : []));
     }
     if (url.pathname.startsWith("/v/notes/")) {
       viewer.seen.push({ url: req.url ?? "", headers: req.headers });
@@ -486,6 +495,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     agentToken,
     agentTokenFor,
     appOps,
+    bridgeOps,
     viewer,
     publicRequests: (path) => seen.get(path) ?? 0,
     mcp,

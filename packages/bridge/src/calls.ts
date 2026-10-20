@@ -14,7 +14,7 @@ import type {
   JsonValue,
   OpResult,
 } from "@opt2-tealbrick/spec/bridge";
-import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
+import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeContext } from "./context.ts";
@@ -173,6 +173,10 @@ export class CallRouter {
     ctx.on("table", () => {
       this.catalogCache.clear();
     });
+    // C283 A1: `admitted` marks follow the app's owner rows, which changed
+    ctx.on("scopes", () => {
+      this.catalogCache.clear();
+    });
   }
 
   /**
@@ -238,18 +242,22 @@ export class CallRouter {
     }
   }
 
-  async catalog(app: AppRuntime, op: string): Promise<DynamicCatalogEntry[]> {
-    const key = `${app.entry.ins}|${op}`;
+  /**
+   * C283 A1 (spec 0.1.50): the body carries `agent`, so the SDK can mark the entries that agent's owner rows admit
+   * (`admitted: "owner"`). The marks differ per agent, so the cache is per agent too. Not bound by the bridge-op proof.
+   */
+  async catalog(app: AppRuntime, op: string, agent: AgentId): Promise<DynamicCatalogEntry[]> {
+    const key = `${app.entry.ins}|${op}|${agent}`;
     const hit = this.catalogCache.get(key);
     if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.entries;
-    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op });
+    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, agent });
     const list = Array.isArray(entries) ? entries.slice(0, 256) : [];
     this.catalogCache.set(key, { at: Date.now(), entries: list });
     return list;
   }
 
-  async search(app: AppRuntime, op: string, query: string, limit?: number): Promise<DynamicCatalogEntry[]> {
-    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, query, ...(limit ? { limit } : {}) });
+  async search(app: AppRuntime, op: string, query: string, limit: number | undefined, agent: AgentId): Promise<DynamicCatalogEntry[]> {
+    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, query, ...(limit ? { limit } : {}), agent });
     return Array.isArray(entries) ? entries.slice(0, MAX_SEARCH_RESULTS) : [];
   }
 
