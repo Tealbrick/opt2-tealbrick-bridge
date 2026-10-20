@@ -90,7 +90,10 @@ describe("C268c: bd in the hook call proof, by capability", () => {
     }
     return hs;
   };
-  const push = async (extra: Record<string, unknown> = {}, omit: string[] = []) => assert.ok([200, 204].includes(await hookApp.status(extra, { omit })));
+  // a push reports the version the config names for the app (S3-1: other versions are ignored for the capabilities)
+  const configVersion = () => w.bridge.ctx.table?.config.apps.find((a) => a.ins === HOOKINS)?.version as string;
+  const push = async (extra: Record<string, unknown> = {}, omit: string[] = [], age?: number) =>
+    assert.ok([200, 204].includes(await hookApp.status({ version: configVersion(), ...extra }, { omit, ...(age ? { age } : {}) })));
   const changeApp = async (change: (a: Record<string, unknown>) => void) => {
     await w.amend((c) => change(c.apps.find((a) => a.ins === HOOKINS) as unknown as Record<string, unknown>));
     await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.bridge.ctx.table?.apps.get(HOOKINS as never)?.down === false, 15000);
@@ -184,6 +187,43 @@ describe("C268c: bd in the hook call proof, by capability", () => {
     await expectNoBd("attempt ended");
     await push({ version: "1.0.1", proofClaims: ["bd"] });
     await expectBd("push after the attempt ended");
+  });
+
+  test("S3-1: a push held back and delivered later cannot take bd away: stale version, unknown version, older iat", async () => {
+    await push({ proofClaims: ["bd"] });
+    await expectBd("before");
+    const current = configVersion();
+    assert.notEqual(current, "1.0.0", "an update happened above: 1.0.0 is the stale version");
+    // the old (pre-update) push, version 1.0.0, no proofClaims
+    assert.ok([200, 204].includes(await hookApp.status({ version: "1.0.0" }, { omit: ["proofClaims"] })));
+    await expectBd("stale-version push without proofClaims");
+    assert.ok([200, 204].includes(await hookApp.status({ version: "9.9.9" }, { omit: ["proofClaims"] })));
+    await expectBd("push of a version the config does not name");
+    // right version, but signed 20 s ago: older than the last accepted push
+    await push({}, ["proofClaims"], 20);
+    await expectBd("older push of the right version");
+    // a current push without proofClaims still removes it (the app really changed)
+    await push({}, ["proofClaims"]);
+    await expectNoBd("current push without proofClaims");
+    // an older push cannot give it back either
+    await push({ proofClaims: ["bd"] }, [], 20);
+    await expectNoBd("older push that lists bd");
+    await push({ proofClaims: ["bd"] });
+    await expectBd("current push that lists bd");
+    // the update candidate's version is accepted too
+    await changeApp((a) => {
+      a.candidateManifestDigest = w.bridge.ctx.table?.config.apps.find((x) => x.ins === HOOKINS)?.manifestDigest;
+      a.candidateVersion = "2.0.0";
+    });
+    await expectNoBd("candidate appeared");
+    assert.ok([200, 204].includes(await hookApp.status({ version: "2.0.0", proofClaims: ["bd"] })));
+    await expectBd("push of the candidate version");
+    await changeApp((a) => {
+      a.candidateManifestDigest = undefined;
+      a.candidateVersion = undefined;
+    });
+    await push({ proofClaims: ["bd"] });
+    await expectBd("attempt ended");
   });
 
   test("a 401 neither drops the capability nor is retried without bd; the same for a connect failure and a timeout", async () => {

@@ -19,6 +19,8 @@ import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
 interface InstanceCaller {
+  /** `iat` of the verified instance assertion (epoch s) */
+  iat: number;
   ins: InstanceId;
   svc: string | undefined;
 }
@@ -88,7 +90,7 @@ export class InternalApi {
     const replayKey = `${v.header.kid}|${v.claims.jti}`;
     if (this.seenJtis.has(replayKey) || this.ctx.proofBeforeBoot(v.claims.iat, now)) throw new BridgeError("unauthenticated", 401);
     this.seenJtis.set(replayKey, v.claims.exp + 30);
-    return { ins, svc };
+    return { ins, svc, iat: v.claims.iat };
   }
 
   private keysFor(ins: InstanceId, svc: string | undefined): KeySet | undefined {
@@ -233,7 +235,9 @@ export class InternalApi {
       const prev = ctx.health.get(caller.ins);
       ctx.health.set(caller.ins, { status: body, lastSeen: nowS() });
       // C268c: an authenticated push of the app instance (a service push never gets here) states its proof capabilities
-      ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims);
+      // S3-1: only a push of the version the config names (serving or update candidate) and not older than the last accepted one
+      const entry = ctx.table?.apps.get(caller.ins)?.entry;
+      ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims, caller.iat, entry ? [entry.version, entry.candidateVersion] : []);
       if (!prev || prev.status.scopesRev !== body.scopesRev) void refreshScopeSummary(this.ctx, this.router, caller.ins, true);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
       // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)

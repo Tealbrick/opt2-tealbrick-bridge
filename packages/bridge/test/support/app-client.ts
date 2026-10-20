@@ -14,7 +14,7 @@ export interface AppClient {
   /** HTTP status of the claim */
   claimStatus: number;
   /** push an AppStatus (the default body is a `ready` app at scopesRev 0); returns the HTTP status (200/204 = accepted) */
-  status(extra?: Record<string, unknown>, o?: { omit?: string[] }): Promise<number>;
+  status(extra?: Record<string, unknown>, o?: { omit?: string[]; /** seconds: sign the assertion this long ago (a push held back by an attacker) */ age?: number }): Promise<number>;
 }
 
 export interface ClaimOptions {
@@ -63,7 +63,7 @@ export async function claimApp(w: World, o: ClaimOptions = {}): Promise<AppClien
       const body = Buffer.from(JSON.stringify(payload));
       const assertion = await w.api.signAssertion(
         "tb-instance-assert+jwt",
-        { iss: `tb:ins:${ins}`, sub: `tb:ins:${ins}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 60, jti: w.api.ulid(), ...(svc ? { svc } : {}) },
+        { iss: `tb:ins:${ins}`, sub: `tb:ins:${ins}`, aud: `tb:brg:${BRG}`, iat: now() - (opt.age ?? 0), exp: opt.age ? now() + 30 : now() + 60, jti: w.api.ulid(), ...(svc ? { svc } : {}) },
         key,
         { method: "POST", pathAndQuery, body },
       );

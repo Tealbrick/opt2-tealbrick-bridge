@@ -9,7 +9,8 @@
  *  - a CONFIG change of that app's `manifestDigest`, `version`, `candidateManifestDigest` or `candidateVersion` (an update
  *    attempt starts or ends, an E3 rollback included) → dropped;
  *  - a re-CLAIM of the app instance → the claim's set;
- *  - an AppStatus PUSH of the app instance whose `version` or set differs from the stored ones → the push's set.
+ *  - an AppStatus PUSH of the app instance whose `version` or set differs from the stored ones → the push's set, only for a version the
+ *    config names for the app and not older (assertion `iat`) than the last accepted push (S3-1: a held-back old push cannot downgrade).
  * NEVER a connect failure, a timeout or a 401 of a hook call (callers of this module do not touch it on those), and a hook
  * call refused 401 is never retried without `bd`. Only an APP-INSTANCE claim or push counts: a companion service (claim or
  * push with a `service`) never reaches this module. A stale capability fails CLOSED: an older app refuses the proof and the
@@ -33,7 +34,7 @@ export function knownProofClaims(v: unknown): ReadonlySet<string> {
 const same = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => a.size === b.size && [...a].every((x) => b.has(x));
 
 export class ProofCaps {
-  private readonly byIns = new Map<InstanceId, { version: string | undefined; caps: ReadonlySet<string> }>();
+  private readonly byIns = new Map<InstanceId, { version: string | undefined; caps: ReadonlySet<string>; iat?: number }>();
 
   /** does the stored set of this app instance list `bd`? */
   hasBd(ins: InstanceId): boolean {
@@ -45,13 +46,24 @@ export class ProofCaps {
     this.byIns.set(ins, { version: typeof version === "string" ? version : undefined, caps: knownProofClaims(proofClaims) });
   }
 
-  /** a status push of the app instance: its set replaces the stored one only when the version or the set differs */
-  onStatus(ins: InstanceId, version: unknown, proofClaims: unknown): void {
+  /**
+   * A status push of the app instance: its set replaces the stored one only when the version or the set differs, AND only when
+   * (S3-1) the push reports a version the config names for the app (`allowedVersions`: the serving version or the update
+   * candidate) and its assertion `iat` is not older than the last accepted push. Otherwise the caps of that push are ignored and
+   * the stored set stays: a network attacker who holds back an old push (up to its 60 s validity) and delivers it after an update
+   * cannot take `bd` away.
+   */
+  onStatus(ins: InstanceId, version: unknown, proofClaims: unknown, iat: number, allowedVersions: readonly (string | undefined)[]): void {
     const v = typeof version === "string" ? version : undefined;
+    if (v === undefined || !allowedVersions.includes(v)) return;
     const caps = knownProofClaims(proofClaims);
     const stored = this.byIns.get(ins);
-    if (!stored ? v === undefined && caps.size === 0 : stored.version === v && same(stored.caps, caps)) return;
-    this.byIns.set(ins, { version: v, caps });
+    if (stored?.iat !== undefined && iat < stored.iat) return;
+    if (!stored ? caps.size === 0 : stored.version === v && same(stored.caps, caps)) {
+      if (stored) stored.iat = iat;
+      return;
+    }
+    this.byIns.set(ins, { version: v, caps, iat });
   }
 
   /** a new table: an app whose manifest digest, version or update candidate changed (or that left the config) loses its set */
