@@ -172,7 +172,12 @@ export class CallRouter {
     this.ctx = ctx;
     // C296: expire, never drop: the next listing asks the apps again, and a refresh that fails falls back to the last
     // good answer instead of an empty list (`catalogFresh`).
-    ctx.on("table", () => this.expireCatalogs());
+    ctx.on("table", (next: Table | undefined) => {
+      this.expireCatalogs();
+      // an instance that left the table never answers again: its cached catalogs go (review: the cache is pruned)
+      const live = new Set([...(next?.apps.values() ?? [])].map((a) => String(a.entry.ins)));
+      for (const key of this.catalogCache.keys()) if (!live.has(key.slice(0, key.indexOf("|")))) this.catalogCache.delete(key);
+    });
     // C283 A1: `admitted` marks follow the app's owner rows, which changed
     ctx.on("scopes", () => this.expireCatalogs());
   }
@@ -240,10 +245,6 @@ export class CallRouter {
     }
   }
 
-  /**
-   * C283 A1 (spec 0.1.50): the body carries `agent`, so the SDK can mark the entries that agent's owner rows admit
-   * (`admitted: "owner"`). The marks differ per agent, so the cache is per agent too. Not bound by the bridge-op proof.
-   */
   /**
    * C296: a tool index past its TTL is rebuilt from fresh catalogs: the agent's cached answers are EXPIRED (not dropped),
    * so a refresh that fails falls back to the last good answer (`catalogFresh`).
