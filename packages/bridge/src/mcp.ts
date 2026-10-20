@@ -455,7 +455,7 @@ export class McpServer {
       const grant = [...t.grants.values()].find((g) => g.claims.sub === `tb:agt:${p.agt}` && g.claims.aud === `tb:ins:${route.app.entry.ins}`);
       const entries = await this.router.search(route.app, route.op.id, query, limit, p.agt);
       // C283 A1: an entry the SDK marked `admitted: "owner"` for this agent is shown above grant.crud (display only)
-      const visible = entries.filter((e) => grant && (e.admitted === "owner" || e.crud.every((c) => grant.claims.crud.includes(c))));
+      const visible = entries.filter((e) => grant && ((e.admitted === "owner" && !route.op.standard && route.op.scopeType !== undefined) || e.crud.every((c) => grant.claims.crud.includes(c))));
       return toolOk({ tools: visible.map((e) => ({ tool: e.name, title: e.title, description: e.description, inputSchema: e.inputSchema as Json, effect: e.effect })) });
     }
     let input: Json = args;

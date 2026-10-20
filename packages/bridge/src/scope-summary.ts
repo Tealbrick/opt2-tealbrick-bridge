@@ -30,6 +30,15 @@ export function admittedOpIds(v: unknown): Set<string> {
   return out;
 }
 
+/** a comparable form of one instance's labels (all agents), to tell whether a refresh changed what the status report shows */
+function labelsKey(ctx: BridgeContext, ins: InstanceId): string {
+  return [...ctx.scopeSummaries.entries()]
+    .filter(([k]) => k.endsWith(`|${ins}`))
+    .map(([k, s]) => `${k}=${s.label}`)
+    .sort()
+    .join(";");
+}
+
 /** a comparable form of one instance's admitted ops (all agents), to tell whether a refresh changed them */
 function admittedKey(ctx: BridgeContext, ins: InstanceId): string {
   return [...ctx.admittedOps.entries()]
@@ -69,6 +78,7 @@ async function doRefresh(ctx: BridgeContext, router: CallRouter, ins: InstanceId
   ctx.scopeSummaryAt.set(ins, Date.now());
   try {
     const list = await router.bridgeOp<{ agent: `agt_${string}`; label: string; admittedOps?: unknown }[]>(app, "scope_summary", {});
+    const labelsBefore = labelsKey(ctx, ins);
     for (const k of [...ctx.scopeSummaries.keys()]) if (k.endsWith(`|${ins}`)) ctx.scopeSummaries.delete(k);
     const before = admittedKey(ctx, ins);
     for (const k of [...ctx.admittedOps.keys()]) if (k.endsWith(`|${ins}`)) ctx.admittedOps.delete(k);
@@ -79,9 +89,14 @@ async function doRefresh(ctx: BridgeContext, router: CallRouter, ins: InstanceId
       const admitted = admittedOpIds(s.admittedOps);
       if (admitted.size > 0) ctx.admittedOps.set(`${s.agent}|${ins}`, admitted);
     }
-    ctx.emit("health");
+    // S4-1: Portal is poked only when the labels changed (the admitted ops are not in the report)
+    if (labelsKey(ctx, ins) !== labelsBefore) ctx.emit("health");
     if (always || admittedKey(ctx, ins) !== before) ctx.emit("scopes", ins);
   } catch {
     ctx.log.warn("bridge.scope_summary.failed", { ins, code: "app_error" });
+    // S4-2: fail closed for display: without a fresh answer no op is shown above the grant (the labels stay, they only inform)
+    const had = admittedKey(ctx, ins) !== "";
+    for (const k of [...ctx.admittedOps.keys()]) if (k.endsWith(`|${ins}`)) ctx.admittedOps.delete(k);
+    if (had) ctx.emit("scopes", ins);
   }
 }

@@ -105,6 +105,11 @@ export class BridgeContext extends EventEmitter {
     this.connectionsSeen.set(con, nowMs);
     if (this.connectionsSeen.size > 500) this.connectionsSeen.delete(this.connectionsSeen.keys().next().value as string);
   }
+  /**
+   * Keyed by instance + tool name, so it is per INSTANCE, not per agent (S4-3): an entry omitted for one agent (a catalog entry above
+   * its grant) is reported as omitted for the app, whichever agent hit it, and stays until the same key is set again or the
+   * catalog of that op works again. It is a hint for Core's status page, not an access decision.
+   */
   readonly toolsOmitted = new Map<string, { ins: InstanceId; name: string; code: "tool_name_too_long" | "name_collision" | "ceiling" | "catalog_failed" }>();
 
   constructor(o: BridgeOptions) {

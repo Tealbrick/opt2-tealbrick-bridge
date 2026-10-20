@@ -36,6 +36,12 @@ const scoped = (id: string, crud: string[], effect: string, extra: Record<string
 const { input: _input, output: _output, ...dynamicBase } = scoped("notes_dyn", ["read"], "read");
 const dynamicList = { ...dynamicBase, idempotency: "supported", dynamic: { mode: "list", crudCeiling: ["read", "update"], effectCeiling: "write" } };
 
+// S3-2: dynamic ops WITHOUT a scopeType (the SDK marks `admitted` only for scoped ones): list mode and search mode; and a scoped search op
+const dynamicOf = (id: string, mode: "list" | "search", scopeType: boolean) => {
+  const { input: _i, output: _o, ...base } = scopeType ? scoped(id, ["read"], "read") : op(id, ["read"], "read");
+  return { ...base, idempotency: "supported", dynamic: { mode, crudCeiling: ["read", "update"], effectCeiling: "write" } };
+};
+
 const manifest = {
   ...notesManifest,
   version: "1.3.0",
@@ -50,6 +56,9 @@ const manifest = {
     op("notes_u_update", ["update"], "write"),
     // a scoped list op: its entries carry their own crud and the SDK's `admitted` mark
     dynamicList,
+    dynamicOf("notes_dyn_plain", "list", false),
+    dynamicOf("notes_srch_plain", "search", false),
+    dynamicOf("notes_srch_s", "search", true),
   ],
 };
 const entry = (name: string, crud: string[], effect: string, extra: Record<string, unknown> = {}) => ({ name, title: name, description: `Entry ${name}`, inputSchema: { type: "object" }, crud, effect, ...extra });
@@ -58,16 +67,26 @@ describe("C283 A1: owner-row filter (bridge 0.2.5)", () => {
   let w: World;
   let client: AppClient;
   let admitted: unknown[] = [];
+  let label = "1 Notebook";
+  const CON2 = "con_01HBBBBBBBBBBBBBBBBBBBBBBB";
   before(async () => {
     w = await makeWorld({ real: true });
     w.updateAppTo(manifest);
     await w.publish();
     await waitFor(() => !!w.bridge.ctx.table?.apps.get(INS as never)?.ops.has("notes_dyn"), 15000);
+    // a second agent that has NO grant to the app, with a connection (S4-4)
+    await w.amend((c) => {
+      c.connections.push({ con: CON2 as never, agt: AGT2 as never, method: "key", gen: 1, publicKey: w.agentKey.publicJwk, status: "active" } as never);
+    });
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
     w.bridgeOps.answer = (path, body) => {
-      if (path === "scope-summary") return [{ agent: AGT, label: "1 Notebook", admittedOps: admitted }, { agent: AGT2, label: "none" }];
+      if (path === "scope-summary") return [{ agent: AGT, label, admittedOps: admitted }, { agent: AGT2, label: "none" }];
       if (path === "catalog") {
         // the SDK marks per agent: AGT's owner row admits the update entry, AGT2 has none
         const mark = body?.agent === AGT ? { admitted: "owner" } : {};
+        // S3-2: an UNSCOPED dynamic op (list or search) whose catalog marks an entry above the grant anyway (a mark the SDK would not give)
+        if (body?.op === "notes_dyn_plain") return [entry("p_read", ["read"], "read"), entry("p_update", ["update"], "write", { admitted: "owner" })];
+        if (body?.op === "notes_srch_plain" || body?.op === "notes_srch_s") return [entry("s_read", ["read"], "read"), entry("s_update", ["update"], "write", { admitted: "owner" })];
         return [entry("e_read", ["read"], "read"), entry("e_update", ["update"], "write", mark), entry("e_update_plain", ["update"], "write"), entry("e_delete", ["delete"], "destructive", { holdFamily: "destructive", ...mark })];
       }
       return [];
@@ -212,17 +231,85 @@ describe("C283 A1: owner-row filter (bridge 0.2.5)", () => {
     assert.ok(!(await toolNames()).includes("notes__notes_s_update"), "and a narrowed row leaves the list");
   });
 
+  test("S3-2: a dynamic SEARCH op shows an admitted entry above the grant only when the op has a scopeType", async () => {
+    const search = async (tool: string) => {
+      const s = await session();
+      const r = await w.mcp(s.token, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: tool, arguments: { query: "x" } } }, s.sid);
+      return ((r.json.result.structuredContent?.tools ?? []) as { tool: string }[]).map((t) => t.tool).sort();
+    };
+    assert.deepEqual(await search("notes__notes_srch_plain_search"), ["s_read"], "unscoped search op: the mark is not trusted");
+    assert.deepEqual(await search("notes__notes_srch_s_search"), ["s_read", "s_update"], "scoped search op: the admitted entry is shown");
+  });
+
+  test("S4-1: Portal is poked (health) only when the labels change, not on every scope-summary answer", async () => {
+    await settle(["notes_s_update"]);
+    let health = 0;
+    const count = () => {
+      health += 1;
+    };
+    w.bridge.ctx.on("health", count);
+    try {
+      await settle(["notes_s_update"]);
+      await settle(["notes_s_update", "notes_s_delete"]);
+      assert.equal(health, 0, "same labels: no health event, also when the admitted ops changed");
+      label = "2 Notebooks";
+      await settle(["notes_s_update"]);
+      assert.equal(health, 1, "a new label: one health event");
+    } finally {
+      w.bridge.ctx.off("health", count);
+      label = "1 Notebook";
+    }
+    await settle(["notes_s_update"]);
+  });
+
+  test("S4-2: a failed scope-summary request clears the app's admitted ops (fail closed for display); the labels stay", async () => {
+    await settle(["notes_s_update"]);
+    assert.ok((await toolNames()).includes("notes__notes_s_update"));
+    w.bridgeOps.status = 500;
+    try {
+      w.bridge.ctx.scopeSummaryAt.set(INS as never, Date.now() - 31_000);
+      assert.ok(!(await toolNames()).includes("notes__notes_s_update"), "not listed after the failed request");
+      assert.ok(!w.bridge.ctx.admittedOps.has(`${AGT}|${INS}`));
+      assert.equal(w.bridge.ctx.scopeSummaries.get(`${AGT}|${INS}`)?.label, "1 Notebook", "the label is kept");
+    } finally {
+      w.bridgeOps.status = undefined;
+    }
+    await settle(["notes_s_update"]);
+    assert.ok((await toolNames()).includes("notes__notes_s_update"), "listed again after a good answer");
+  });
+
+  test("S4-4: an agent without a grant to the app never causes its scope-summary request", async () => {
+    const token = await w.agentTokenFor(AGT2, CON2);
+    const init = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test" } } });
+    const sid = init.session as string;
+    stale();
+    const n = summaryRequests();
+    const list = await w.mcp(token, { jsonrpc: "2.0", id: 2, method: "tools/list" }, sid);
+    assert.ok(!(list.json.result.tools as { name: string }[]).some((t) => t.name.startsWith("notes__")), "no tools of the app");
+    for (const name of ["notes__notes_s_delete", "notes__notes_s_update"]) {
+      const r = await w.mcp(token, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: {} } }, sid);
+      assert.equal(r.json.result.isError, true, name);
+      assert.equal(r.json.result.structuredContent?.error?.code, "unknown_tool", name);
+    }
+    assert.equal(summaryRequests(), n, "no request for an agent without a grant");
+  });
+
   test("(b) the catalog body carries the agent; an entry marked admitted: owner is listed above grant.crud, within the op's ceilings", async () => {
     const names = await toolNames();
     const catalogBodies = w.bridgeOps.seen.filter((s) => s.path === "catalog").map((s) => s.body);
     assert.ok(catalogBodies.length >= 1);
-    for (const b of catalogBodies) assert.deepEqual(b, { op: "notes_dyn", agent: AGT }, "op and agent; no query");
+    for (const b of catalogBodies) assert.deepEqual(Object.keys(b).sort(), "query" in b ? ["agent", "op", "query"] : ["agent", "op"], "op and agent (list); with the query (search)");
+    for (const b of catalogBodies) assert.equal(b.agent, AGT);
+    assert.ok(catalogBodies.some((b) => b.op === "notes_dyn"));
     assert.ok(names.includes("notes__e_read"), "within the grant");
     assert.ok(names.includes("notes__e_update"), "admitted: owner, above the grant, within the op ceiling");
     assert.ok(!names.includes("notes__e_update_plain"), "unmarked, above the grant: omitted");
     assert.ok(!names.includes("notes__e_delete"), "marked, but above the op's crudCeiling: omitted");
     const omitted = [...w.bridge.ctx.toolsOmitted.values()].filter((o) => o.code === "ceiling").map((o) => o.name).sort();
-    assert.deepEqual(omitted, ["e_delete", "e_update_plain"]);
+    assert.deepEqual(omitted, ["e_delete", "e_update_plain", "p_update"]);
+    // S3-2: the mark counts only for a dynamic op WITH a scopeType
+    assert.ok(names.includes("notes__p_read"), "unscoped dynamic list: within the grant, listed");
+    assert.ok(!names.includes("notes__p_update"), "unscoped dynamic list: a mark above the grant is not trusted");
   });
 
   test("the catalog cache is per agent: another agent's marks are never shown to this one", async () => {

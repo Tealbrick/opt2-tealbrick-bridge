@@ -123,9 +123,10 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         }
         const ceiling = EFFECTS.indexOf(op.dynamic.effectCeiling);
         for (const e of catalog) {
-          // C283 A1: an entry the SDK marked `admitted: "owner"` for this agent is listed above grant.crud (display only); the op's
+          // C283 A1: an entry the SDK marked `admitted: "owner"` for this agent is listed above grant.crud (display only) when the
+          // dynamic op has a scopeType (the SDK marks only those; as the static branch, never trust the mark otherwise); the op's
           // own ceilings still hold, and the SDK authorizes the call
-          if (!(subset(e.crud, g.claims.crud) || e.admitted === "owner") || !subset(e.crud, op.dynamic.crudCeiling) || EFFECTS.indexOf(e.effect) > ceiling) {
+          if (!(subset(e.crud, g.claims.crud) || (e.admitted === "owner" && op.scopeType !== undefined)) || !subset(e.crud, op.dynamic.crudCeiling) || EFFECTS.indexOf(e.effect) > ceiling) {
             ctx.toolsOmitted.set(`${app.entry.ins}|${e.name}`, { ins: app.entry.ins, name: e.name, code: "ceiling" });
             continue;
           }

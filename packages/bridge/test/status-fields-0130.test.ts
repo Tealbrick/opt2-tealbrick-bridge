@@ -118,11 +118,12 @@ describe("0.1.30: forwarded members in the status report and one health event pe
       return health - before;
     };
 
-    // baseline: the first report emits, and its scope_summary refresh may emit once more; let it settle first
+    // baseline: the first report emits; its scope_summary refresh emits only when the labels change; let it settle first
     const first = health;
     lines.length = 0;
     await status({});
-    await waitFor(() => health - first >= 2 || lines.some((l) => l.event === "bridge.scope_summary.failed"), 15000);
+    // S4-1: the scope-summary refresh emits health only when the labels change (this app has none), so wait for it to have finished
+    await waitFor(() => health - first >= 1 && w.bridge.ctx.scopeSummaryRuns.size === 0 && w.bridge.ctx.scopeSummaryAt.has(INS as never), 15000);
     for (const k of ["schemaVersion", "minCompatibleCode", "failure"]) assert.ok(!(k in app()), `absent ${k} stays absent`);
     assert.equal(await emits({}), 0, "no change → no health event");
 

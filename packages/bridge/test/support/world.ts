@@ -157,7 +157,7 @@ export interface World {
    * the fake app's bridge-op route (`/tb/v1/bridge/<catalog|resolve|mark|scope-summary>`): every body it received (with the
    * TB-Call proof) and the handler that answers (`[]` when none)
    */
-  bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown };
+  bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown; /** answer every bridge op with this HTTP status and no body */ status?: number };
 }
 
 export interface WorldOptions {
@@ -272,6 +272,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       const b = await body(req);
       const path = url.pathname.slice(14);
       bridgeOps.seen.push({ path, body: b, proof: req.headers["tb-call"] as string | undefined });
+      if (bridgeOps.status !== undefined) return res.writeHead(bridgeOps.status).end();
       const custom = bridgeOps.answer?.(path, b);
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom !== undefined ? custom : []));
     }
