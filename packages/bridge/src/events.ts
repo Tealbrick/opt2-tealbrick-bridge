@@ -63,8 +63,8 @@ export class EventIngestLimit extends Error {
   }
 }
 
-/** How often the age rule and the dedupe window are applied to agents nobody reads (ms). */
-const SWEEP_MS = 60_000;
+/** Store health (review round 2): probe every 60 s; withdraw `events` after 5 min unhealthy; restore after 3 good probes. */
+export const EVENT_STORE_HEALTH = { probeMs: 60_000, capDropAfterMs: 5 * 60_000, probesToRestore: 3 } as const;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SCHEMA_VERSION = "1";
@@ -125,8 +125,8 @@ export interface EventStoreOptions {
   hookMatches: HookMatch;
   /** test clock (ms) */
   now?: () => number;
-  /** told when the store turns unhealthy or recovers (the status report re-states the caps) */
-  onHealth?: (healthy: boolean) => void;
+  /** told when the `events` cap is withdrawn or restored (the status report re-states the caps); never inside the 5 min window */
+  onHealth?: (available: boolean) => void;
 }
 
 /**
@@ -134,42 +134,122 @@ export interface EventStoreOptions {
  * change each run as one step: a re-id applied with a resume is done before any later ingest is read (BRIDGE §14.2).
  */
 export class EventStore {
-  readonly #db: DatabaseSync;
+  #db: DatabaseSync | undefined;
+  readonly #path: string;
   readonly #log: Logger;
   readonly #digestOf: (m: Manifest) => string;
   readonly #hookMatches: HookMatch;
   now: () => number;
   /** the highest id issued (ids are strictly increasing per bridge, across restarts) */
-  #lastId: string;
+  #lastId = "";
+  /** after a reset (a corrupt file moved aside): the first id of the new log; a cursor below it lost the old log */
+  #resetThrough: string | null = null;
   /** rows per agent (a cache; dropped on bulk deletes) */
   readonly #counts = new Map<string, number>();
   /** content-addressed manifests (digest → manifest) of the releases the config names */
   readonly #manifests = new Map<string, Manifest>();
-  readonly #stmt: Record<string, StatementSync> = {};
+  #stmt: Record<string, StatementSync> = {};
   readonly #sweep: NodeJS.Timeout;
   #closed = false;
-  #healthy = true;
-  readonly #onHealth: ((healthy: boolean) => void) | undefined;
+  /** writes work (false after an I/O-class failure until a probe succeeds); ingest answers 503 while false */
+  #healthy = false;
+  /** since when the store is unhealthy (ms), null = healthy */
+  #unhealthySince: number | null = null;
+  /** the `events` cap is withdrawn (unhealthy ≥ 5 min, or not open); restored after 3 consecutive good probes */
+  #capDropped = true;
+  #goodProbes = 0;
+  #openFailureLogged = false;
+  readonly #onHealth: ((available: boolean) => void) | undefined;
   /** stored recipient rows per app instance (BRIDGE §14.1 fan-out limit): tokens and the time they were counted */
   readonly #fanout = new Map<string, { tokens: number; at: number }>();
 
   constructor(o: EventStoreOptions) {
+    this.#path = o.path;
     this.#log = o.log;
     this.#digestOf = o.digestOf;
     this.#hookMatches = o.hookMatches;
     this.#onHealth = o.onHealth;
     this.now = o.now ?? Date.now;
-    const opened = openDatabase(o.path, o.log, this.now);
-    this.#db = opened.db;
-    this.#lastId = opened.lastId;
-    this.#sweep = setInterval(() => this.sweep(), SWEEP_MS);
+    this.#open();
+    this.#sweep = setInterval(() => this.sweep(), EVENT_STORE_HEALTH.probeMs);
     this.#sweep.unref();
+  }
+
+  /**
+   * Opens events.db. CORRUPT or NOTADB at open or at the schema check → the file (with -wal/-shm) is moved to
+   * `events.db.corrupt-<ms>` and a fresh log starts, recording the reset point (`truncated: true` for a cursor below it). Any
+   * other failure (disk full, permissions, a schema NEWER than this bridge after a downgrade) leaves the file untouched and the
+   * store closed: the bridge runs without app events and retries on the next probe.
+   */
+  #open(): boolean {
+    const attempt = (): DatabaseSync => {
+      const db = new DatabaseSync(this.#path);
+      try {
+        createSchema(db);
+        return db;
+      } catch (e) {
+        try {
+          db.close();
+        } catch {
+          /* already unusable */
+        }
+        throw e;
+      }
+    };
+    let db: DatabaseSync;
+    let reset = false;
+    try {
+      db = attempt();
+    } catch (e) {
+      if (!isCorruptFile(e)) {
+        if (!this.#openFailureLogged) this.#log.error("bridge.events.db_unavailable", { code: errorCode(e) });
+        this.#openFailureLogged = true;
+        return false;
+      }
+      const aside = `${this.#path}.corrupt-${this.now()}`;
+      this.#log.error("bridge.events.db_corrupt", { code: errorCode(e), movedTo: aside });
+      try {
+        for (const suffix of ["", "-wal", "-shm"]) if (existsSync(`${this.#path}${suffix}`)) renameSync(`${this.#path}${suffix}`, `${aside}${suffix}`);
+        db = attempt();
+        reset = true;
+      } catch (e2) {
+        this.#log.error("bridge.events.db_unavailable", { code: errorCode(e2) });
+        this.#openFailureLogged = true;
+        return false;
+      }
+    }
+    const meta = (k: string) => (db.prepare("SELECT v FROM meta WHERE k = ?").get(k) as { v: string } | undefined)?.v ?? null;
+    if (reset) {
+      // ids continue from the clock (a ULID is time-ordered); every id of the old log is below this one
+      const through = ulid(this.now());
+      db.prepare("INSERT INTO meta (k, v) VALUES ('reset_at', ?), ('reset_through_id', ?), ('last_id', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").run(String(this.now()), through, through);
+    }
+    const stored = meta("last_id") ?? "";
+    const maxRow = (db.prepare("SELECT max(id) AS m FROM rows").get() as { m: string | null }).m ?? "";
+    this.#lastId = [this.#lastId, stored, maxRow].reduce((x, y) => (y > x ? y : x), "");
+    this.#resetThrough = meta("reset_through_id");
+    this.#db = db;
+    this.#stmt = {};
+    this.#counts.clear();
+    const wasAvailable = this.available;
+    this.#healthy = true;
+    this.#unhealthySince = null;
+    this.#capDropped = false;
+    this.#goodProbes = 0;
+    this.#openFailureLogged = false;
+    if (!wasAvailable) this.#onHealth?.(true);
+    return true;
+  }
+
+  get #d(): DatabaseSync {
+    if (!this.#db || this.#closed) throw new Error("events.db is not open");
+    return this.#db;
   }
 
   #s(sql: string): StatementSync {
     let st = this.#stmt[sql];
     if (!st) {
-      st = this.#db.prepare(sql);
+      st = this.#d.prepare(sql);
       this.#stmt[sql] = st;
     }
     return st;
@@ -177,12 +257,11 @@ export class EventStore {
 
   /**
    * One write transaction. On any failure it rolls back and drops the row-count cache (a failed batch must not leave counts
-   * that cause false retention deletes). A database failure (not an ingest limit) marks the store unhealthy until a probe
-   * (the 60 s sweep) succeeds: while unhealthy the bridge does not declare `events`, ingest answers 503 and the methods -32601.
+   * that cause false retention deletes). Only an I/O-class failure marks the store unhealthy (see {@link #failed}).
    */
   #tx<T>(fn: () => T): T {
     try {
-      this.#db.exec("BEGIN IMMEDIATE");
+      this.#d.exec("BEGIN IMMEDIATE");
     } catch (e) {
       this.#failed(e);
       throw e;
@@ -190,52 +269,88 @@ export class EventStore {
     try {
       const out = fn();
       this.#s("INSERT INTO meta (k, v) VALUES ('last_id', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").run(this.#lastId);
-      this.#db.exec("COMMIT");
+      this.#d.exec("COMMIT");
       return out;
     } catch (e) {
       this.#counts.clear();
       try {
-        this.#db.exec("ROLLBACK");
+        this.#d.exec("ROLLBACK");
       } catch {
         /* the transaction is already gone */
       }
-      if (!(e instanceof EventIngestLimit)) this.#failed(e);
+      this.#failed(e);
       throw e;
     }
   }
 
+  /**
+   * Health (review round 2): only SQLite I/O-class failures (FULL, IOERR, CORRUPT, NOTADB, READONLY, CANTOPEN) make the store
+   * unhealthy; anything else is that request's failure. Unhealthy → ingest 503 at once; the `events` cap is withdrawn only
+   * after 5 min of continuous unhealth and comes back after 3 consecutive good probes (60 s apart), so it does not flap.
+   */
   #failed(e: unknown): void {
-    if (!this.#healthy) return;
-    this.#log.error("bridge.events.db_failed", { code: e instanceof Error ? e.message.slice(0, 120) : "error" });
-    this.#healthy = false;
+    if (!isStorageFailure(e)) return;
+    this.#unhealthy(e);
+  }
+
+  #unhealthy(e: unknown): void {
+    this.#goodProbes = 0;
+    if (this.#healthy) {
+      this.#log.error("bridge.events.db_failed", { code: errorCode(e) });
+      this.#healthy = false;
+      this.#unhealthySince = this.now();
+    }
+    this.#checkCapDrop();
+  }
+
+  #checkCapDrop(): void {
+    if (this.#capDropped || this.#unhealthySince === null) return;
+    if (this.now() - this.#unhealthySince < EVENT_STORE_HEALTH.capDropAfterMs) return;
+    this.#capDropped = true;
+    this.#log.error("bridge.events.cap_withdrawn", {});
     this.#onHealth?.(false);
   }
 
-  /** false after a database failure, until a probe succeeds (caps.ts drops `events` meanwhile) */
-  get healthy(): boolean {
-    return this.#healthy && !this.#closed;
+  /** The `events` cap is declared and the methods are served: the log is open and was not unhealthy for 5 min (caps.ts). */
+  get available(): boolean {
+    return !!this.#db && !this.#closed && !this.#capDropped;
   }
 
-  /** A small write transaction; success makes the store healthy again. */
+  /** Writes work now: ingest is accepted (else 503 at once, whatever the cap says). */
+  get healthy(): boolean {
+    return this.available && this.#healthy;
+  }
+
+  /** A small write transaction (or a re-open when the log is not open). Counts toward restoring the cap. */
   probe(): boolean {
+    if (this.#closed) return false;
+    if (!this.#db) return this.#open();
     try {
-      this.#db.exec("BEGIN IMMEDIATE");
-      this.#db.prepare("INSERT INTO meta (k, v) VALUES ('probe', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").run(String(this.now()));
-      this.#db.exec("COMMIT");
-      if (!this.#healthy) {
-        this.#log.info("bridge.events.db_recovered", {});
-        this.#healthy = true;
-        this.#onHealth?.(true);
-      }
+      this.#d.exec("BEGIN IMMEDIATE");
+      this.#d.prepare("INSERT INTO meta (k, v) VALUES ('probe', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").run(String(this.now()));
+      this.#d.exec("COMMIT");
     } catch (e) {
       try {
-        this.#db.exec("ROLLBACK");
+        this.#d.exec("ROLLBACK");
       } catch {
         /* none open */
       }
-      this.#failed(e);
+      this.#unhealthy(e);
+      return false;
     }
-    return this.#healthy;
+    if (!this.#healthy) this.#log.info("bridge.events.db_recovered", {});
+    this.#healthy = true;
+    this.#unhealthySince = null;
+    if (this.#capDropped) {
+      this.#goodProbes += 1;
+      if (this.#goodProbes >= EVENT_STORE_HEALTH.probesToRestore) {
+        this.#capDropped = false;
+        this.#goodProbes = 0;
+        this.#log.info("bridge.events.cap_restored", {});
+        this.#onHealth?.(true);
+      }
+    }
+    return true;
   }
 
   /** A new row id: a ULID, strictly greater than every id this bridge issued before (also after a clock step back). */
@@ -250,7 +365,7 @@ export class EventStore {
     if (this.#closed) return;
     this.#closed = true;
     clearInterval(this.#sweep);
-    this.#db.close();
+    this.#db?.close();
   }
 
   // ── manifests: the serving release and, during a G2b attempt, the candidate ─────────────────────────────────────────────
@@ -542,7 +657,10 @@ export class EventStore {
   /** The age rule and the dedupe window for every agent (also those nobody reads). */
   sweep(): void {
     if (this.#closed) return;
-    if (!this.#healthy && !this.probe()) return;
+    this.#checkCapDrop();
+    if (!this.#db || !this.#healthy || this.#capDropped) {
+      if (!this.probe() || !this.#healthy) return;
+    }
     try {
       const now = this.now();
       this.#tx(() => {
@@ -573,6 +691,7 @@ export class EventStore {
   }
 
   #onTable(t: Table): { released: number; dropped: number } {
+    if (!this.#db) return { released: 0, dropped: 0 };
     this.#tx(() => this.#rememberManifests(t));
     const held = this.#s("SELECT id, agent, ins, op FROM rows WHERE held = 1 ORDER BY id").all() as { id: string; agent: string; ins: string; op: string }[];
     if (held.length === 0) return { released: 0, dropped: 0 };
@@ -672,6 +791,11 @@ export class EventStore {
     return this.#tx(() => {
       this.#retain(agent, now);
       const a = this.#s("SELECT dropped_through, held_dropped FROM agents WHERE agent = ?").get(agent) as { dropped_through: string | null; held_dropped: number } | undefined;
+      // a reset (corrupt file moved aside): a cursor from the old log lost everything after it
+      if (cursor !== null && this.#resetThrough !== null && cursor < this.#resetThrough) {
+        if (a?.held_dropped === 1) this.#s("UPDATE agents SET held_dropped = 0 WHERE agent = ?").run(agent);
+        return true;
+      }
       if (!a) return false;
       if (a.held_dropped === 1) {
         this.#s("UPDATE agents SET held_dropped = 0 WHERE agent = ?").run(agent);
@@ -744,7 +868,7 @@ export class EventStore {
 
   /** Test hook: raw SQL against the log (e.g. to age rows). Never used by the bridge. */
   exec(sql: string, ...params: SQLInputValue[]): void {
-    this.#db.prepare(sql).run(...params);
+    this.#d.prepare(sql).run(...params);
     this.#counts.clear();
   }
 }
@@ -786,49 +910,29 @@ function createSchema(db: DatabaseSync): void {
   db.prepare("SELECT count(*) FROM rows").get();
 }
 
-/**
- * Opens events.db; a file that fails to open or to pass the schema check is moved aside (`events.db.corrupt-<ms>`, with its
- * -wal/-shm) and a fresh log is created (ids continue from the clock: a ULID is time-ordered). A second failure throws (the
- * caller then runs the bridge without the event log and without the `events` cap).
- */
-function openDatabase(path: string, log: Logger, now: () => number): { db: DatabaseSync; lastId: string } {
-  const attempt = (): { db: DatabaseSync; lastId: string } => {
-    const db = new DatabaseSync(path);
-    try {
-      createSchema(db);
-      const stored = (db.prepare("SELECT v FROM meta WHERE k = 'last_id'").get() as { v: string } | undefined)?.v ?? "";
-      const maxRow = (db.prepare("SELECT max(id) AS m FROM rows").get() as { m: string | null }).m ?? "";
-      return { db, lastId: stored > maxRow ? stored : maxRow };
-    } catch (e) {
-      try {
-        db.close();
-      } catch {
-        /* already unusable */
-      }
-      throw e;
-    }
-  };
-  try {
-    return attempt();
-  } catch (e) {
-    const aside = `${path}.corrupt-${now()}`;
-    log.error("bridge.events.db_unusable", { code: e instanceof Error ? e.message.slice(0, 120) : "error", movedTo: aside });
-    for (const suffix of ["", "-wal", "-shm"]) if (existsSync(`${path}${suffix}`)) renameSync(`${path}${suffix}`, `${aside}${suffix}`);
-    return attempt();
-  }
+/** SQLite primary result codes of the I/O class (review round 2): only these make the store unhealthy. */
+const STORAGE_FAILURE_CODES = new Set([8 /* READONLY */, 10 /* IOERR */, 11 /* CORRUPT */, 13 /* FULL */, 14 /* CANTOPEN */, 26 /* NOTADB */]);
+const primaryCode = (e: unknown): number | null => {
+  const c = (e as { errcode?: unknown } | null)?.errcode;
+  return typeof c === "number" ? c & 0xff : null;
+};
+export function isStorageFailure(e: unknown): boolean {
+  const c = primaryCode(e);
+  return c !== null && STORAGE_FAILURE_CODES.has(c);
 }
+/** CORRUPT or NOTADB: the only reasons a file is moved aside. */
+function isCorruptFile(e: unknown): boolean {
+  const c = primaryCode(e);
+  return c === 11 || c === 26;
+}
+const errorCode = (e: unknown): string => {
+  const c = primaryCode(e);
+  return `${c !== null ? `sqlite_${c}: ` : ""}${e instanceof Error ? e.message.slice(0, 120) : "error"}`;
+};
 
-/**
- * The event log, or undefined when it cannot be opened even after moving a bad file aside: the bridge then runs WITHOUT app
- * events (ingest 503, `tealbrick/events/*` -32601, no `events` cap).
- */
-export function openEventStore(o: EventStoreOptions): EventStore | undefined {
-  try {
-    return new EventStore(o);
-  } catch (e) {
-    o.log.error("bridge.events.unavailable", { code: e instanceof Error ? e.message.slice(0, 120) : "error" });
-    return undefined;
-  }
+/** The event log (it never throws: a log that cannot be opened is retried by its probe while the bridge runs without it). */
+export function openEventStore(o: EventStoreOptions): EventStore {
+  return new EventStore(o);
 }
 
 /** Every agent with a grant to `ins` (in a stable order). */

@@ -182,6 +182,11 @@ export async function agentSession(w: World, agt: string, con: string, tokenIn?:
   };
 }
 
+/** A GET /mcp stream on an existing session with a given token (e.g. a refreshed one). */
+export function listenOn(w: World, token: string, sid: string, lastEventId?: string): Listener {
+  return listen(w, token, sid, lastEventId);
+}
+
 function listen(w: World, token: string, sid: string, lastEventId?: string): Listener {
   const ac = new AbortController();
   const frames: SseFrame[] = [];

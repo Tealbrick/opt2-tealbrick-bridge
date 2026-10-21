@@ -16,7 +16,7 @@
  *  - `events` = app events, ALL of BRIDGE §14 (spec 0.1.57, bridge 0.2.7): ingest `POST /tb/v1/events` (internal.ts
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
- *    Reported only while the event log is healthy ({@link bridgeCaps}).
+ *    Reported only while the event log is available ({@link bridgeCaps}).
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
@@ -24,8 +24,8 @@ export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows", "events
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
- * is not open or not healthy (bridge 0.2.7, events.ts: a failed open or a database failure until a probe succeeds). A copy.
+ * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
  */
-export function bridgeCaps(ctx: { events?: { healthy: boolean } | undefined }): BridgeCap[] {
-  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.healthy === true);
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
+  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
 }

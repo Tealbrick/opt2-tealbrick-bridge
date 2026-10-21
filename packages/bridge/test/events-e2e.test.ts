@@ -13,7 +13,8 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
-import { type Agent, agentSession, ev, eventsManifest, item, nOf, op, postEvents } from "./support/events.ts";
+import { issueAccess, revokeLocal, rotateRefresh } from "../src/identity.ts";
+import { type Agent, agentSession, ev, eventsManifest, item, listenOn, nOf, op, postEvents } from "./support/events.ts";
 import { AGT, AGT2, CON, INS, makeWorld, type World, waitFor } from "./support/world.ts";
 
 const CON2 = "con_01HBBBBBBBBBBBBBBBBBBBBBBB";
@@ -324,12 +325,14 @@ describe("review round 1 (bridge#16) S1: an open stream is re-authorized before 
   let e: EvWorld;
   const CON3 = "con_01HCCCCCCCCCCCCCCCCCCCCCCC";
   const CON4 = "con_01HDDDDDDDDDDDDDDDDDDDDDDD";
+  const CON5 = "con_01HEEEEEEEEEEEEEEEEEEEEEEE";
+  const CON6 = "con_01HFFFFFFFFFFFFFFFFFFFFFFF";
   before(async () => {
     e = await eventsWorld();
     await e.w.amend((c) => {
-      for (const con of [CON3, CON4]) c.connections.push({ con, agt: AGT, method: "key", gen: 1, publicKey: e.w.agentKey.publicJwk, status: "active" } as never);
+      for (const con of [CON3, CON4, CON5, CON6]) c.connections.push({ con, agt: AGT, method: "key", gen: 1, publicKey: e.w.agentKey.publicJwk, status: "active" } as never);
     });
-    await waitFor(() => e.w.bridge.ctx.table?.connections.has(CON4 as never) === true, 15000);
+    await waitFor(() => e.w.bridge.ctx.table?.connections.has(CON6 as never) === true, 15000);
   });
   after(async () => {
     await e.w.close();
@@ -352,27 +355,110 @@ describe("review round 1 (bridge#16) S1: an open stream is re-authorized before 
     return { a, l };
   };
 
-  for (const variant of ["revoked by a config swap", "gen rotated by a config swap"] as const) {
-    test(`C274f: event A delivered; the connection is ${variant} mid-stream; event B → no frame, no summary text of B on the socket, the stream and session are ended`, async () => {
-      const con = variant.startsWith("revoked") ? CON3 : CON4;
-      const { a, l } = await openStream(con);
+  test("C274f: event A delivered; the connection is revoked by a config swap mid-stream; event B → no frame, no summary text of B on the socket, the stream and session are ended", async () => {
+    const { a, l } = await openStream(CON3);
+    try {
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 1, summary: "summary-of-A" })]));
+      await l.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 1);
+      await e.w.amend((c) => {
+        (c.connections.find((x) => x.con === CON3) as unknown as Record<string, unknown>).status = "revoked";
+      });
+      await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 2, summary: "SECRET-summary-of-B" })]));
+      await waitFor(() => l.ended(), 3000);
+      await sleep(300);
+      assert.ok(!l.frames.some((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 2), "no frame for B");
+      assert.ok(!l.raw().includes("SECRET-summary-of-B"), "no summary text of B on the socket");
+      assert.ok(l.raw().includes("summary-of-A"), "A was delivered before");
+      const after = await e.w.mcp(a.token, { jsonrpc: "2.0", id: 99, method: "tealbrick/events/poll", params: {} }, a.sid);
+      assert.equal(after.status, 401, "the old token no longer authenticates");
+    } finally {
+      l.close();
+    }
+  });
+
+  test("C274f (round 2): a Portal gen rotation closes the old stream at once (no frame, no summary of B); the session and its subscription stay; a current-gen GET with Last-Event-ID resumes with B exactly once", async () => {
+    const { a, l } = await openStream(CON4);
+    try {
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 11, summary: "summary-of-A" })]));
+      const fa = await l.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 11);
+      await e.w.amend((c) => {
+        (c.connections.find((x) => x.con === CON4) as unknown as Record<string, unknown>).gen = 2;
+      });
+      await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
+      await waitFor(() => l.ended(), 3000);
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 12, summary: "SECRET-summary-of-B" })]));
+      await sleep(300);
+      assert.ok(!l.raw().includes("SECRET-summary-of-B"));
+      // a token of the current gen on the SAME session: the subscription is still there
+      const fresh = await e.w.agentTokenFor(AGT, CON4);
+      const r = await e.w.mcp(fresh, { jsonrpc: "2.0", id: 7, method: "ping" }, a.sid);
+      assert.equal(r.status, 200, "the session survived the rotation");
+      const l3 = listenOn(e.w, fresh, a.sid, fa.id);
       try {
-        okResult(await postEvents(e.w, e.appKey, [item({ n: 1, summary: "summary-of-A" })]));
-        await l.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 1);
-        await e.w.amend((c) => {
-          const entry = c.connections.find((x) => x.con === con) as unknown as Record<string, unknown>;
-          if (variant.startsWith("revoked")) entry.status = "revoked";
-          else entry.gen = 2;
-        });
-        await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
-        okResult(await postEvents(e.w, e.appKey, [item({ n: 2, summary: "SECRET-summary-of-B" })]));
-        await waitFor(() => l.ended(), 3000);
+        await l3.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 12);
         await sleep(300);
-        assert.ok(!l.frames.some((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 2), "no frame for B");
-        assert.ok(!l.raw().includes("SECRET-summary-of-B"), "no summary text of B on the socket");
-        assert.ok(l.raw().includes("summary-of-A"), "A was delivered before");
-        const after = await e.w.mcp(a.token, { jsonrpc: "2.0", id: 99, method: "tealbrick/events/poll", params: {} }, a.sid);
-        assert.equal(after.status, 401, "the old token no longer authenticates");
+        assert.deepEqual(l3.frames.filter((x) => x.msg.method === NOTIFY).map((x) => nOf(x.msg.params.event)), [12], "B once, A not again");
+      } finally {
+        l3.close();
+      }
+    } finally {
+      l.close();
+    }
+  });
+
+  test("round 2: a pairing refresh mid-stream closes the old-gen stream; session + subscription kept; the new token's GET with Last-Event-ID resumes with no loss and no duplicate", async () => {
+    const ctx = e.w.bridge.ctx;
+    const PCON = "con_01HPPPPPPPPPPPPPPPPPPPPPPP";
+    const refresh = "tbr_round2pairingrefresh";
+    const now = Math.floor(Date.now() / 1000);
+    ctx.state.connections.set(PCON as never, { con: PCON, agt: AGT, refreshDigest: ctx.api.opaqueDigest(refresh), gen: 1, previousDigest: null, previousUntil: null, previousUsed: false, expiresAt: now + 3600, clientName: "pairing-test", createdAt: now, reported: false } as never);
+    const t1 = await issueAccess(ctx, AGT as never, PCON as never, 1);
+    const { a, l } = await openStream(PCON, t1);
+    try {
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 21, summary: "first" })]));
+      const fa = await l.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 21);
+      const { rec } = rotateRefresh(ctx, refresh); // gen 2 (what /oauth/token does)
+      assert.equal(rec.gen, 2);
+      const t2 = await issueAccess(ctx, AGT as never, PCON as never, rec.gen);
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 22, summary: "SECRET-second" }), item({ n: 23 })]));
+      await waitFor(() => l.ended(), 3000);
+      assert.ok(!l.raw().includes("SECRET-second"), "nothing to the old-gen stream");
+      const l2 = listenOn(e.w, t2, a.sid, fa.id);
+      try {
+        await l2.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 23);
+        await sleep(300);
+        assert.deepEqual(l2.frames.filter((x) => x.msg.method === NOTIFY).map((x) => nOf(x.msg.params.event)), [22, 23]);
+      } finally {
+        l2.close();
+      }
+      // the old token cannot open a stream any more
+      const old = await fetch(`${e.w.publicUrl}/mcp`, { headers: { authorization: `Bearer ${t1}`, "mcp-session-id": a.sid, accept: "text/event-stream" } });
+      assert.equal(old.status, 401);
+      await old.body?.cancel();
+    } finally {
+      l.close();
+      ctx.state.connections.delete(PCON as never);
+    }
+  });
+
+  for (const how of ["revokeLocal", "a connection state change without a table event"] as const) {
+    test(`round 2: a flush already queued when the connection is revoked (${how}) writes no frame`, async () => {
+      const ctx = e.w.bridge.ctx;
+      const con = how === "revokeLocal" ? CON5 : CON6;
+      const { l } = await openStream(con);
+      try {
+        const t = ctx.table as NonNullable<typeof ctx.table>;
+        const app = t.apps.get(INS as never);
+        assert.ok(app && ctx.events);
+        const { agents } = ctx.events.ingest(t, app, [item({ n: 31, summary: "SECRET-queued" })]);
+        ctx.emit("events-stored", agents); // the flush is now queued (setImmediate)
+        if (how === "revokeLocal") revokeLocal(ctx, con as never, "client_revoke");
+        else (t.connections.get(con as never) as unknown as Record<string, unknown>).status = "revoked";
+        await sleep(500);
+        assert.ok(!l.raw().includes("SECRET-queued"));
+        assert.ok(!l.frames.some((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 31));
+        await waitFor(() => l.ended(), 3000);
       } finally {
         l.close();
       }
@@ -406,24 +492,36 @@ describe("review round 1 (bridge#16) S2: event-log failures never take the bridg
     await e.w.close();
   });
 
-  test("a database failure → ingest 503, events methods -32601, StatusReports without events; recovered by the probe → events again", async () => {
+  test("a storage failure (READONLY) → ingest 503 at once; after 5 min unhealthy the cap goes (methods -32601, reports without events); 3 good probes bring it back", async () => {
     const store = e.w.bridge.ctx.events;
     assert.ok(store);
-    const a1 = await agentSession(e.w, AGT, CON);
-    store.exec("CREATE TRIGGER fail_rows BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'disk full'); END");
-    assert.equal((await postEvents(e.w, e.appKey, [item({ n: 1 })])).status, 503);
-    assert.equal((await postEvents(e.w, e.appKey, [item({ n: 1 })])).status, 503, "unhealthy: refused before the store");
-    assert.equal((await a1.rpc("tealbrick/events/list")).error?.code, -32601);
-    const acks = e.w.acks.length;
-    await waitFor(() => e.w.acks.length > acks && !(e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"), 15000);
-    // config applies still work while the store is down
-    await e.w.publish();
-    await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
-    store.exec("DROP TRIGGER fail_rows");
-    assert.equal(store.probe(), true);
-    await waitFor(() => (e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"), 15000);
-    okResult(await postEvents(e.w, e.appKey, [item({ n: 2 })]));
-    assert.ok((await a1.rpc("tealbrick/events/list")).result);
+    const real = store.now;
+    let clock = real();
+    store.now = () => clock;
+    try {
+      const a1 = await agentSession(e.w, AGT, CON);
+      store.exec("PRAGMA query_only = 1");
+      assert.equal((await postEvents(e.w, e.appKey, [item({ n: 1 })])).status, 503);
+      assert.equal((await postEvents(e.w, e.appKey, [item({ n: 1 })])).status, 503, "unhealthy: refused before the store");
+      assert.ok((await a1.rpc("tealbrick/events/list")).result, "inside the window the cap and the methods stay");
+      clock += 5 * 60_000;
+      store.probe();
+      assert.equal((await a1.rpc("tealbrick/events/list")).error?.code, -32601);
+      await waitFor(() => !(e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"), 15000);
+      // config applies still work while the store is down
+      await e.w.publish();
+      await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
+      store.exec("PRAGMA query_only = 0");
+      for (let i = 0; i < 3; i++) {
+        clock += 60_000;
+        assert.equal(store.probe(), true);
+      }
+      await waitFor(() => (e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"), 15000);
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 2 })]));
+      assert.ok((await a1.rpc("tealbrick/events/list")).result);
+    } finally {
+      store.now = real;
+    }
   });
 
   test("a corrupt events.db at boot is moved aside; the bridge starts with a fresh log and declares events", async () => {

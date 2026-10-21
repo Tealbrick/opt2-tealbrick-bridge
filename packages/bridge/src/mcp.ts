@@ -26,9 +26,6 @@ interface Session {
   con: ConnectionId;
   protocol: string;
   streams: Set<ServerResponse>;
-  /** the connection generation and token expiry (epoch s) of the last request on this session (S1: re-checked before frames) */
-  gen: number;
-  exp: number;
   toolDigest: string;
   skillsDigest: string;
   lastSeen: number;
@@ -37,6 +34,8 @@ interface Session {
   events?: { cursor: string | null };
   /** a frame flush is scheduled */
   flushQueued?: boolean;
+  /** a flush waits for 'drain' on a slow stream (one listener at a time) */
+  drainWait?: boolean;
 }
 
 interface RpcRequest {
@@ -88,6 +87,8 @@ export class McpServer {
   private readonly rebuilding = new Set<string>();
   private readonly limits: McpLimits;
   private readonly postBucket: TokenBucket;
+  /** S1: the connection gen and token expiry of the token that opened each GET stream */
+  private readonly streamAuth = new WeakMap<ServerResponse, { gen: number; exp: number }>();
   private readonly eventsBucket: TokenBucket;
   private readonly callsByCon = new Map<string, number>();
   private callsInFlight = 0;
@@ -101,11 +102,12 @@ export class McpServer {
     this.eventsBucket = new TokenBucket(this.limits.eventsRatePerS, this.limits.eventsBurst);
     ctx.on("table", () => {
       this.indexCache.clear();
-      // S1: a config that revokes a connection, rotates its gen or removes its agent ends that connection's sessions at once
-      // (streams closed), before any frame or list_changed goes out under the new table
+      // S1: a config that revokes a connection or removes its agent ends that connection's sessions at once; a gen rotation
+      // closes the streams opened with an older gen (the session and its subscription stay; the client reopens GET with a
+      // current token and Last-Event-ID), before any frame or list_changed goes out under the new table
       for (const s of [...this.sessions.values()]) {
-        const st = connectionState(ctx, s.con);
-        if (!st || !st.active || st.gen !== s.gen || st.agt !== s.agt || !ctx.table?.agents.has(s.agt)) this.endSession(s.id);
+        if (!this.sessionValid(s)) this.endSession(s.id);
+        else this.pruneStreams(s);
       }
       void this.notifyChanges();
       // BRIDGE §14.3: a resume (agent, workspace or instance) releases held rows; subscribed streams pick them up
@@ -138,9 +140,6 @@ export class McpServer {
       return undefined;
     }
     s.lastSeen = Date.now();
-    // the token of this request: a refreshed connection (pairing gen) or a later expiry carries over to the open streams
-    s.gen = p.gen;
-    s.exp = p.exp;
     this.sessions.delete(s.id);
     this.sessions.set(s.id, s);
     return s;
@@ -297,26 +296,41 @@ export class McpServer {
    * reader is waited for (drain) instead of buffering the whole backlog.
    */
   /**
-   * S1 (bridge 0.2.7 review): a session may receive events only while the connection that opened it is still what its last
-   * token said: listed (or locally paired) and active, the same agent and `gen`, the agent still in the config, the token not
-   * expired. A Portal-side revoke, a gen rotation, an agent removal or a token expiry ends the session (the client
-   * re-initializes, or reconnects with Last-Event-ID and a fresh token).
+   * S1 (bridge 0.2.7 review): a session lives while its connection is listed (or locally paired) and active, for the same
+   * agent, and the agent is in the config. A revoke or an agent change/removal ends it (the client re-initializes).
    */
-  private authorized(s: Session): boolean {
+  private sessionValid(s: Session): boolean {
     const t = this.ctx.table;
     const st = connectionState(this.ctx, s.con);
-    return !!t && !!st && st.active && st.gen === s.gen && st.agt === s.agt && t.agents.has(s.agt) && s.exp > nowS();
+    return !!t && !!st && st.active && st.agt === s.agt && t.agents.has(s.agt);
+  }
+
+  /**
+   * Review round 2: gen and expiry belong to each STREAM (the token that opened it). A stream whose gen is not the
+   * connection's current gen (a pairing refresh, a Portal rotation) or whose token expired is closed; the session stays.
+   */
+  private pruneStreams(s: Session): void {
+    const st = connectionState(this.ctx, s.con);
+    const now = nowS();
+    for (const res of [...s.streams]) {
+      const a = this.streamAuth.get(res);
+      if (a && st && a.gen === st.gen && a.exp > now) continue;
+      s.streams.delete(res);
+      res.end();
+    }
   }
 
   private flush(s: Session): void {
     const store = this.ctx.events;
     const t = this.ctx.table;
     const sub = s.events;
-    if (!store?.healthy || !t || !sub || s.streams.size === 0 || this.sessions.get(s.id) !== s) return;
-    if (!this.authorized(s)) {
+    if (!store?.available || !t || !sub || s.streams.size === 0 || this.sessions.get(s.id) !== s) return;
+    if (!this.sessionValid(s)) {
       this.endSession(s.id);
       return;
     }
+    this.pruneStreams(s);
+    if (s.streams.size === 0) return;
     if (t.pausedWorkspace || t.pausedAgents.has(s.agt)) return;
     try {
       for (let pages = 0; pages < 20; pages++) {
@@ -325,7 +339,17 @@ export class McpServer {
           // a slow reader: stop before the next write, continue on 'drain' (the cursor names the last frame written)
           const slow = [...s.streams].find((r) => r.writableNeedDrain);
           if (slow) {
-            slow.once("drain", () => this.scheduleFlush(s));
+            if (!s.drainWait) {
+              s.drainWait = true;
+              const go = () => {
+                s.drainWait = false;
+                slow.off("close", go);
+                slow.off("drain", go);
+                this.scheduleFlush(s);
+              };
+              slow.once("drain", go);
+              slow.once("close", go);
+            }
             return;
           }
           const data = `id: ${e.id}\nevent: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: EVENT_MCP_METHODS.notification, params: { event: e } })}\n\n`;
@@ -399,6 +423,7 @@ export class McpServer {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
       res.write(": ok\n\n");
       s.streams.add(res);
+      this.streamAuth.set(res, { gen: principal.gen, exp: principal.exp });
       const ka = setInterval(() => {
         if (!res.writableEnded) res.write(": ping\n\n");
       }, 25_000);
@@ -466,7 +491,7 @@ export class McpServer {
       const requested = typeof rpc.params?.protocolVersion === "string" ? rpc.params.protocolVersion : "";
       const protocol = MCP_VERSIONS.includes(requested) ? requested : (MCP_VERSIONS[0] as string);
       const clientName = isRecord(rpc.params?.clientInfo) && typeof rpc.params.clientInfo.name === "string" ? rpc.params.clientInfo.name.slice(0, 64) : "";
-      session = { id: randomBytes(16).toString("base64url"), agt: principal.agt, con: principal.con, gen: principal.gen, exp: principal.exp, protocol, streams: new Set(), toolDigest: "", skillsDigest: "", lastSeen: Date.now() };
+      session = { id: randomBytes(16).toString("base64url"), agt: principal.agt, con: principal.con, protocol, streams: new Set(), toolDigest: "", skillsDigest: "", lastSeen: Date.now() };
       this.addSession(session);
       const t = this.ctx.table as Table;
       this.ctx.log.info("bridge.mcp.initialize", { agt: principal.agt, protocol, client: clientName });
@@ -567,7 +592,7 @@ export class McpServer {
   private eventMethod(t: Table, s: Session, rpc: RpcRequest): unknown {
     const store = this.ctx.events;
     // without a healthy event log the bridge does not declare `events`: the methods are unknown (runtimes keep their polls)
-    if (!store?.healthy) throw new RpcError(-32601, "method not found");
+    if (!store?.available) throw new RpcError(-32601, "method not found");
     const params = isRecord(rpc.params) ? rpc.params : {};
     const paused = t.pausedWorkspace || t.pausedAgents.has(s.agt);
     if (rpc.method === EVENT_MCP_METHODS.list) return store.list(t, s.agt);

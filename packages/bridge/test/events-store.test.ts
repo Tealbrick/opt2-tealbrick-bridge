@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import type { AgentEvent } from "@opt2-tealbrick/spec/bridge";
 import { bridgeCaps } from "../src/caps.ts";
-import { EVENT_FANOUT_LIMIT, EVENT_RETENTION_ROWS, EventIngestLimit, EventStore, openEventStore, ulidAfter } from "../src/events.ts";
+import { EVENT_FANOUT_LIMIT, EVENT_RETENTION_ROWS, EventIngestLimit, EventStore, isStorageFailure, ulidAfter } from "../src/events.ts";
 import type { Table } from "../src/table.ts";
 import { silentLogger } from "../src/util.ts";
 import { api, ev, eventsManifest, item, nOf, op, openStore, runtime, table } from "./support/events.ts";
@@ -584,46 +584,148 @@ describe("review round 1 (bridge#16): limits, failures, documented edges", () =>
     assert.equal(s.retention(AGT).droppedThrough, null, "nothing was removed: exactly 10 000 rows");
   });
 
-  test("S2: a database failure marks the store unhealthy (no events cap) until a probe succeeds; onTable never throws", () => {
-    const s = fresh();
-    const t = world();
-    assert.deepEqual(bridgeCaps({ events: s }), ["owner_rows", "events"]);
-    s.exec("CREATE TRIGGER fail_rows BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'disk full'); END");
-    assert.throws(() => s.ingest(t, appA, [item({ n: 1 })]));
-    assert.equal(s.healthy, false);
-    assert.deepEqual(bridgeCaps({ events: s }), ["owner_rows"]);
-    s.exec("CREATE TRIGGER fail_manifests BEFORE INSERT ON manifests BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+  const withHealth = (path?: string) => {
+    const dir = path ? undefined : mkdtempSync(join(tmpdir(), "tb-events-health-"));
+    if (dir) dirs.push(dir);
+    const flips: boolean[] = [];
+    const st = new EventStore({ path: path ?? join(dir as string, "events.db"), log: silentLogger, digestOf: (m) => api.manifestDigest(m), hookMatches: () => false, onHealth: (x) => flips.push(x) });
+    stores.push(st);
+    flips.length = 0; // the first open is not a flip
+    return { st, flips, dir: dir as string };
+  };
+
+  test("round 2 / 2: only I/O-class SQLite errors mark the store unhealthy; other errors are that request's failure", () => {
+    const { st } = withHealth();
+    assert.equal(isStorageFailure({ errcode: 13 }), true, "FULL");
+    assert.equal(isStorageFailure({ errcode: 266 }), true, "IOERR_READ (extended code)");
+    for (const c of [8, 10, 11, 14, 26]) assert.equal(isStorageFailure({ errcode: c }), true);
+    for (const c of [1, 5, 19, 2067]) assert.equal(isStorageFailure({ errcode: c }), false, `code ${c}`);
+    assert.equal(isStorageFailure(new Error("x")), false);
+    st.exec("CREATE TRIGGER fail_rows BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'refused by a trigger'); END");
+    assert.throws(() => st.ingest(world(), appA, [item({ n: 1 })]));
+    assert.equal(st.healthy, true, "a logic/constraint error is not a storage failure");
+    st.exec("DROP TRIGGER fail_rows");
+    assert.equal(st.ingest(world(), appA, [item({ n: 2 })]).result.results[0]?.status, "stored");
+  });
+
+  test("round 2 / 2: hysteresis — ingest refuses at once; the cap goes only after 5 min unhealthy and comes back after 3 good probes; no flip inside the window", () => {
+    const { st, flips } = withHealth();
+    let clock = Date.now();
+    st.now = () => clock;
+    st.exec("PRAGMA query_only = 1"); // every write now fails with SQLITE_READONLY
+    assert.throws(() => st.ingest(world(), appA, [item({ n: 1 })]));
+    assert.equal(st.healthy, false, "ingest answers 503 at once");
+    assert.equal(st.available, true);
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events"], "the cap stays inside the window");
+    clock += 4 * 60_000;
+    assert.equal(st.probe(), false);
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events"]);
+    assert.deepEqual(flips, [], "no status poke inside the window");
+    clock += 60_000; // 5 min continuously unhealthy
+    st.probe();
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows"]);
+    assert.equal(st.available, false);
+    assert.deepEqual(flips, [false]);
+    st.exec("PRAGMA query_only = 0");
+    for (let i = 1; i <= 2; i++) {
+      clock += 60_000;
+      assert.equal(st.probe(), true);
+      assert.equal(st.available, false, `${i} good probe(s): not yet`);
+      assert.equal(st.healthy, false, "no ingest while the cap is withdrawn");
+    }
+    clock += 60_000;
+    st.probe();
+    assert.equal(st.available, true);
+    assert.equal(st.healthy, true);
+    assert.deepEqual(flips, [false, true]);
+    // a bad probe in between restarts the count of good ones
+    st.exec("PRAGMA query_only = 1");
+    st.probe();
+    clock += 5 * 60_000;
+    st.probe();
+    assert.deepEqual(flips, [false, true, false]);
+    st.exec("PRAGMA query_only = 0");
+    st.probe();
+    st.probe();
+    st.exec("PRAGMA query_only = 1");
+    st.probe();
+    st.exec("PRAGMA query_only = 0");
+    st.probe();
+    st.probe();
+    assert.equal(st.available, false, "2 + 2 good probes with a bad one between: not restored");
+    st.probe();
+    assert.equal(st.available, true);
+  });
+
+  test("round 2 / 2: a short outage (recovered within 5 min) never withdraws the cap and pokes nothing; onTable never throws", () => {
+    const { st, flips } = withHealth();
+    let clock = Date.now();
+    st.now = () => clock;
+    st.exec("PRAGMA query_only = 1");
+    assert.throws(() => st.ingest(world(), appA, [item({ n: 1 })]));
     const other = runtime(INS_A, "notes", { ...mA, version: "9.0.0" });
-    assert.deepEqual(s.onTable(world({ apps: [other, appB] })), { released: 0, dropped: 0 }, "an event-log failure never throws into the config apply");
-    s.exec("DROP TRIGGER fail_rows");
-    s.exec("DROP TRIGGER fail_manifests");
-    assert.equal(s.probe(), true);
-    assert.equal(s.healthy, true);
-    assert.equal(s.ingest(t, appA, [item({ n: 2 })]).result.results[0]?.status, "stored");
+    assert.deepEqual(st.onTable(world({ apps: [other, appB] })), { released: 0, dropped: 0 }, "an event-log failure never throws into the config apply");
+    clock += 2 * 60_000;
+    st.exec("PRAGMA query_only = 0");
+    assert.equal(st.probe(), true);
+    assert.equal(st.healthy, true);
+    clock += 10 * 60_000;
+    st.sweep();
+    assert.deepEqual(flips, []);
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events"]);
     assert.deepEqual(bridgeCaps({ events: undefined }), ["owner_rows"], "no store: no events cap");
   });
 
-  test("S2: an unreadable or foreign events.db is moved aside (events.db.corrupt-<ts>) and a fresh log starts; ids stay ULIDs from the clock", () => {
+  test("round 2 / 3: a NOTADB file is moved aside and a fresh log starts with a reset point: truncated only for a cursor below it", () => {
     const dir = mkdtempSync(join(tmpdir(), "tb-events-corrupt-"));
     dirs.push(dir);
     const path = join(dir, "events.db");
     writeFileSync(path, "this is not a sqlite database at all, just bytes".repeat(100));
-    const s = openEventStore({ path, log: silentLogger, digestOf: (m) => api.manifestDigest(m), hookMatches: () => false });
-    assert.ok(s, "opened after moving the file aside");
-    stores.push(s);
-    assert.ok(readdirSync(dir).some((f) => f.startsWith("events.db.corrupt-")));
-    s.ingest(world(), appA, [item({ n: 1 })]);
-    assert.match(s.rows(AGT)[0]?.id ?? "", /^[0-9A-HJKMNP-TV-Z]{26}$/);
-    // a newer schema version is not read either
-    s.exec("UPDATE meta SET v = '99' WHERE k = 'schema'");
-    s.close();
-    const again = openEventStore({ path, log: silentLogger, digestOf: (m) => api.manifestDigest(m), hookMatches: () => false });
-    assert.ok(again);
-    stores.push(again);
-    assert.equal(again.rows(AGT).length, 0);
-    assert.equal(readdirSync(dir).filter((f) => /^events\.db\.corrupt-\d+$/.test(f)).length, 2);
-    // a path that cannot hold a database at all: no store (the bridge runs without app events)
-    assert.equal(openEventStore({ path: join(dir, "missing", "dir", "events.db"), log: silentLogger, digestOf: () => "", hookMatches: () => false }), undefined);
+    const oldCursor = ulidAfter("01HZZZZZZZZZZZZZZZZZZZZZZZ"); // an id of the lost log
+    const { st } = withHealth(path);
+    assert.equal(st.available, true);
+    assert.ok(readdirSync(dir).some((f) => /^events\.db\.corrupt-\d+$/.test(f)));
+    st.ingest(world(), appA, [item({ n: 1 })]);
+    const first = st.rows(AGT)[0]?.id ?? "";
+    assert.match(first, /^[0-9A-HJKMNP-TV-Z]{26}$/);
+    assert.equal(poll(st, world(), AGT, oldCursor).truncated, true, "a cursor of the old log");
+    assert.equal(poll(st, world(), AGT, oldCursor).truncated, true, "every time, not once");
+    assert.equal(poll(st, world(), AGT, null).truncated, false, "no cursor: not truncated");
+    assert.equal(poll(st, world(), AGT, first).truncated, false, "a cursor of the new log");
+    st.close();
+    // the reset point survives a reopen
+    const { st: again } = withHealth(path);
+    assert.equal(poll(again, world(), AGT, oldCursor).truncated, true);
+    again.ingest(world(), appA, [item({ n: 2 })]);
+    assert.ok((again.rows(AGT).at(-1)?.id ?? "") > first);
+  });
+
+  test("round 2 / 3: any other open failure (a NEWER schema, an unopenable path) never renames the file; the bridge runs without the log and the probe retries", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { st, dir } = withHealth();
+    st.ingest(world(), appA, [item({ n: 1 })]);
+    st.close();
+    const path = join(dir, "events.db");
+    const raw = new DatabaseSync(path);
+    raw.prepare("UPDATE meta SET v = '99' WHERE k = 'schema'").run();
+    raw.close();
+    const { st: newer, flips } = withHealth(path);
+    assert.equal(newer.available, false);
+    assert.equal(newer.healthy, false);
+    assert.deepEqual(bridgeCaps({ events: newer }), ["owner_rows"]);
+    assert.ok(!readdirSync(dir).some((f) => f.includes("corrupt")), "never renamed");
+    assert.equal(newer.probe(), false, "still newer");
+    // the downgrade is undone (this bridge's schema again): the probe opens it, rows intact
+    const fix = new DatabaseSync(path);
+    fix.prepare("UPDATE meta SET v = '1' WHERE k = 'schema'").run();
+    fix.close();
+    assert.equal(newer.probe(), true);
+    assert.equal(newer.available, true);
+    assert.deepEqual(flips, [true]);
+    assert.equal(newer.rows(AGT).length, 1);
+    const { st: nowhere } = withHealth(join(dir, "missing", "dir", "events.db"));
+    assert.equal(nowhere.available, false);
+    assert.equal(nowhere.probe(), false);
     assert.ok(!existsSync(join(dir, "missing")));
   });
 
