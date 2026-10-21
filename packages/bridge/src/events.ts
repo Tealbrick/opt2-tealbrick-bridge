@@ -11,6 +11,7 @@
  * come from `@opt2-tealbrick/manifest` (L1); nothing here re-implements them. The visibility rule is the tools/list rule
  * (`opVisibleToGrant`, through `eventVisibleToGrant`), with the per-entry authority of `eligible` for scoped events.
  */
+import { existsSync, renameSync } from "node:fs";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import {
   EVENT_BATCH_MAX,
@@ -44,6 +45,24 @@ export const EVENT_RETENTION_ROWS = 10_000;
 export const EVENT_RETENTION_MS = EVENT_WINDOW_MS;
 /** `tealbrick/events/poll` limit (BRIDGE §14.3): 1..100, default 50. */
 export const EVENT_POLL_LIMIT = { min: 1, max: 100, default: 50 } as const;
+/**
+ * BRIDGE §14.1 fan-out limit (C274f): stored recipient rows per app instance, a token bucket of 6 000 rows per minute with a
+ * burst of 30 000. A batch that would exceed it is refused as a whole before anything of it is stored: 429 + Retry-After (the
+ * SDK retries the same keys), or 413 when the batch alone needs more than the burst (the SDK halves the batch).
+ */
+export const EVENT_FANOUT_LIMIT = { perMinute: 6_000, burst: 30_000 } as const;
+
+/** A whole-request refusal from the ingest step (the transaction is rolled back; nothing of the batch is stored). */
+export class EventIngestLimit extends Error {
+  readonly status: 413 | 429;
+  readonly retryAfterS: number;
+  constructor(status: 413 | 429, retryAfterS: number, message: string) {
+    super(message);
+    this.status = status;
+    this.retryAfterS = retryAfterS;
+  }
+}
+
 /** How often the age rule and the dedupe window are applied to agents nobody reads (ms). */
 const SWEEP_MS = 60_000;
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -106,6 +125,8 @@ export interface EventStoreOptions {
   hookMatches: HookMatch;
   /** test clock (ms) */
   now?: () => number;
+  /** told when the store turns unhealthy or recovers (the status report re-states the caps) */
+  onHealth?: (healthy: boolean) => void;
 }
 
 /**
@@ -127,48 +148,20 @@ export class EventStore {
   readonly #stmt: Record<string, StatementSync> = {};
   readonly #sweep: NodeJS.Timeout;
   #closed = false;
+  #healthy = true;
+  readonly #onHealth: ((healthy: boolean) => void) | undefined;
+  /** stored recipient rows per app instance (BRIDGE §14.1 fan-out limit): tokens and the time they were counted */
+  readonly #fanout = new Map<string, { tokens: number; at: number }>();
 
   constructor(o: EventStoreOptions) {
     this.#log = o.log;
     this.#digestOf = o.digestOf;
     this.#hookMatches = o.hookMatches;
+    this.#onHealth = o.onHealth;
     this.now = o.now ?? Date.now;
-    this.#db = new DatabaseSync(o.path);
-    this.#db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
-    this.#db.exec(`
-      CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
-      CREATE TABLE IF NOT EXISTS rows (
-        id TEXT PRIMARY KEY,
-        origin TEXT NOT NULL,
-        agent TEXT NOT NULL,
-        ins TEXT NOT NULL,
-        product TEXT NOT NULL,
-        type TEXT NOT NULL,
-        instance_id TEXT,
-        digest TEXT NOT NULL,
-        op TEXT NOT NULL,
-        scope_type TEXT,
-        authority TEXT,
-        envelope TEXT NOT NULL,
-        ingest_at INTEGER NOT NULL,
-        held INTEGER NOT NULL DEFAULT 0
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS rows_agent_id ON rows (agent, id);
-      CREATE INDEX IF NOT EXISTS rows_agent_ingest ON rows (agent, ingest_at, origin);
-      CREATE INDEX IF NOT EXISTS rows_scope ON rows (ins, instance_id, agent);
-      CREATE INDEX IF NOT EXISTS rows_held ON rows (held) WHERE held = 1;
-      CREATE INDEX IF NOT EXISTS rows_ingest ON rows (ingest_at);
-      CREATE TABLE IF NOT EXISTS agents (agent TEXT PRIMARY KEY, dropped_through TEXT, held_dropped INTEGER NOT NULL DEFAULT 0) STRICT;
-      CREATE TABLE IF NOT EXISTS keys (ins TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (ins, key)) STRICT;
-      CREATE INDEX IF NOT EXISTS keys_at ON keys (at);
-      CREATE TABLE IF NOT EXISTS manifests (digest TEXT PRIMARY KEY, json TEXT NOT NULL) STRICT;
-    `);
-    const schema = this.#db.prepare("SELECT v FROM meta WHERE k = 'schema'").get() as { v: string } | undefined;
-    if (!schema) this.#db.prepare("INSERT INTO meta (k, v) VALUES ('schema', ?)").run(SCHEMA_VERSION);
-    else if (schema.v !== SCHEMA_VERSION) throw new Error(`events.db schema ${schema.v} is not ${SCHEMA_VERSION}`);
-    const stored = (this.#db.prepare("SELECT v FROM meta WHERE k = 'last_id'").get() as { v: string } | undefined)?.v ?? "";
-    const maxRow = (this.#db.prepare("SELECT max(id) AS m FROM rows").get() as { m: string | null }).m ?? "";
-    this.#lastId = stored > maxRow ? stored : maxRow;
+    const opened = openDatabase(o.path, o.log, this.now);
+    this.#db = opened.db;
+    this.#lastId = opened.lastId;
     this.#sweep = setInterval(() => this.sweep(), SWEEP_MS);
     this.#sweep.unref();
   }
@@ -182,17 +175,67 @@ export class EventStore {
     return st;
   }
 
+  /**
+   * One write transaction. On any failure it rolls back and drops the row-count cache (a failed batch must not leave counts
+   * that cause false retention deletes). A database failure (not an ingest limit) marks the store unhealthy until a probe
+   * (the 60 s sweep) succeeds: while unhealthy the bridge does not declare `events`, ingest answers 503 and the methods -32601.
+   */
   #tx<T>(fn: () => T): T {
-    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.exec("BEGIN IMMEDIATE");
+    } catch (e) {
+      this.#failed(e);
+      throw e;
+    }
     try {
       const out = fn();
       this.#s("INSERT INTO meta (k, v) VALUES ('last_id', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").run(this.#lastId);
       this.#db.exec("COMMIT");
       return out;
     } catch (e) {
-      this.#db.exec("ROLLBACK");
+      this.#counts.clear();
+      try {
+        this.#db.exec("ROLLBACK");
+      } catch {
+        /* the transaction is already gone */
+      }
+      if (!(e instanceof EventIngestLimit)) this.#failed(e);
       throw e;
     }
+  }
+
+  #failed(e: unknown): void {
+    if (!this.#healthy) return;
+    this.#log.error("bridge.events.db_failed", { code: e instanceof Error ? e.message.slice(0, 120) : "error" });
+    this.#healthy = false;
+    this.#onHealth?.(false);
+  }
+
+  /** false after a database failure, until a probe succeeds (caps.ts drops `events` meanwhile) */
+  get healthy(): boolean {
+    return this.#healthy && !this.#closed;
+  }
+
+  /** A small write transaction; success makes the store healthy again. */
+  probe(): boolean {
+    try {
+      this.#db.exec("BEGIN IMMEDIATE");
+      this.#db.prepare("INSERT INTO meta (k, v) VALUES ('probe', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v").run(String(this.now()));
+      this.#db.exec("COMMIT");
+      if (!this.#healthy) {
+        this.#log.info("bridge.events.db_recovered", {});
+        this.#healthy = true;
+        this.#onHealth?.(true);
+      }
+    } catch (e) {
+      try {
+        this.#db.exec("ROLLBACK");
+      } catch {
+        /* none open */
+      }
+      this.#failed(e);
+    }
+    return this.#healthy;
   }
 
   /** A new row id: a ULID, strictly greater than every id this bridge issued before (also after a clock step back). */
@@ -227,7 +270,11 @@ export class EventStore {
     if (this.#manifests.has(digest)) return;
     if (this.#digestOf(m) !== digest) return;
     this.#manifests.set(digest, m);
-    this.#s("INSERT INTO manifests (digest, json) VALUES (?, ?) ON CONFLICT (digest) DO NOTHING").run(digest, JSON.stringify(m));
+    try {
+      this.#s("INSERT INTO manifests (digest, json) VALUES (?, ?) ON CONFLICT (digest) DO NOTHING").run(digest, JSON.stringify(m));
+    } catch (e) {
+      this.#failed(e); // kept in memory only (a restart fetches it again)
+    }
   }
 
   #manifestBy(app: AppRuntime, digest: string | undefined): Resolved | undefined {
@@ -235,7 +282,13 @@ export class EventStore {
     if (app.manifest && app.digest === digest) return { manifest: app.manifest, digest };
     const mem = this.#manifests.get(digest);
     if (mem) return { manifest: mem, digest };
-    const row = this.#s("SELECT json FROM manifests WHERE digest = ?").get(digest) as { json: string } | undefined;
+    let row: { json: string } | undefined;
+    try {
+      row = this.#s("SELECT json FROM manifests WHERE digest = ?").get(digest) as { json: string } | undefined;
+    } catch (e) {
+      this.#failed(e);
+      return undefined;
+    }
     if (!row) return undefined;
     try {
       const m = JSON.parse(row.json) as Manifest;
@@ -282,11 +335,26 @@ export class EventStore {
    */
   ingest(t: Table, app: AppRuntime, items: unknown[]): { result: EventIngestResult; agents: Set<string> } {
     const agents = new Set<string>();
-    const results = this.#tx(() => items.slice(0, EVENT_BATCH_MAX).map((it) => this.#item(t, app, it, agents)));
+    const ins = app.entry.ins;
+    const budget = { available: this.#fanoutAvailable(ins), stored: 0 };
+    const results = this.#tx(() => items.slice(0, EVENT_BATCH_MAX).map((it) => this.#item(t, app, it, agents, budget)));
+    // committed: the stored rows are taken from the instance's bucket
+    const b = this.#fanout.get(ins);
+    if (b) b.tokens -= budget.stored;
     return { result: { results }, agents };
   }
 
-  #item(t: Table, app: AppRuntime, it: unknown, agents: Set<string>): ItemResult {
+  /** Tokens of the per-instance stored-row bucket now (refilled since the last count). */
+  #fanoutAvailable(ins: string): number {
+    const now = this.now();
+    const b = this.#fanout.get(ins) ?? { tokens: EVENT_FANOUT_LIMIT.burst, at: now };
+    b.tokens = Math.min(EVENT_FANOUT_LIMIT.burst, b.tokens + (Math.max(0, now - b.at) / 60_000) * EVENT_FANOUT_LIMIT.perMinute);
+    b.at = now;
+    this.#fanout.set(ins, b);
+    return b.tokens;
+  }
+
+  #item(t: Table, app: AppRuntime, it: unknown, agents: Set<string>, budget: { available: number; stored: number }): ItemResult {
     const key = isObj(it) && typeof it.key === "string" ? it.key : "";
     const refuse = (code: EventRefuseCode): ItemResult => ({ key, status: "refused", code });
     if (!isObj(it)) return refuse("event_payload_invalid");
@@ -382,6 +450,20 @@ export class EventStore {
     const opServing = withStandardOps(serving.manifest).some((o) => o.id === decl.visibleWith);
     const held = t.pausedInstances.has(ins) || !opServing ? 1 : 0;
     const now = this.now();
+    // rule 1 once per distinct grant shape: the same shared function (eventVisibleToGrant) on the declaring manifest reduced
+    // to the visibleWith op (its standard ops and declared scope types stay), so a 500-agent fan-out does not rebuild the op list
+    const declOp = declared.manifest.operations.find((o) => o.id === decl.visibleWith);
+    const reduced = { ...declared.manifest, operations: declOp ? [declOp] : [] } as Manifest;
+    const visible = new Map<string, boolean>();
+    const rule1 = (claims: GrantClaims, authority: "owner" | "bounded" | null): boolean => {
+      const k = `${claims.mode}|${[...claims.wf].sort().join(",")}|${[...claims.crud].sort().join(",")}|${authority}`;
+      let v = visible.get(k);
+      if (v === undefined) {
+        v = eventVisibleToGrant(reduced, decl, claims, authority);
+        visible.set(k, v);
+      }
+      return v;
+    };
     let recipients = 0;
     for (const agent of candidates) {
       if (agent === causedBy) continue; // rule 3
@@ -389,7 +471,11 @@ export class EventStore {
       const authority = scopeType !== null ? (eligible.get(agent) ?? null) : null;
       if (scopeType !== null && authority === null) continue; // rule 2: never outside `eligible`
       const claims = validGrant(t, agent, ins, now);
-      if (!claims || !eventVisibleToGrant(declared.manifest, decl, claims, authority)) continue; // rule 1
+      if (!claims || !rule1(claims, authority)) continue; // rule 1
+      // the per-instance stored-row limit: the whole batch is refused (rolled back) before anything of it is stored
+      budget.stored += 1;
+      if (budget.stored > EVENT_FANOUT_LIMIT.burst) throw new EventIngestLimit(413, 0, "the batch fans out to more rows than this instance may store at once; send smaller batches");
+      if (budget.stored > budget.available) throw new EventIngestLimit(429, Math.max(1, Math.ceil(((budget.stored - budget.available) / EVENT_FANOUT_LIMIT.perMinute) * 60)), "this instance stored too many event rows; retry later");
       const before = this.#count(agent);
       const id = this.#nextId();
       this.#s(
@@ -456,6 +542,7 @@ export class EventStore {
   /** The age rule and the dedupe window for every agent (also those nobody reads). */
   sweep(): void {
     if (this.#closed) return;
+    if (!this.#healthy && !this.probe()) return;
     try {
       const now = this.now();
       this.#tx(() => {
@@ -476,7 +563,17 @@ export class EventStore {
    * the serving manifest once no attempt runs (rollback), or whose instance left the config, is dropped.
    */
   onTable(t: Table): { released: number; dropped: number } {
-    this.#rememberManifests(t);
+    try {
+      return this.#onTable(t);
+    } catch (e) {
+      // never takes the config apply down: logged, the store marked unhealthy, held rows are retried on the next table
+      this.#failed(e);
+      return { released: 0, dropped: 0 };
+    }
+  }
+
+  #onTable(t: Table): { released: number; dropped: number } {
+    this.#tx(() => this.#rememberManifests(t));
     const held = this.#s("SELECT id, agent, ins, op FROM rows WHERE held = 1 ORDER BY id").all() as { id: string; agent: string; ins: string; op: string }[];
     if (held.length === 0) return { released: 0, dropped: 0 };
     let released = 0;
@@ -511,21 +608,29 @@ export class EventStore {
   // ── delivery (BRIDGE §14.3) ─────────────────────────────────────────────────────────────────────────────────────────────
 
   /** Rules 1, 5 and 6 at delivery against the current table and the CURRENT serving manifest. */
-  #verdict(t: Table, r: RowRecord, now: number): Verdict {
+  #verdict(t: Table, r: RowRecord, now: number, memo: Map<string, unknown>): Verdict {
     const app = t.apps.get(r.ins as InstanceId);
     if (!app) return { kind: "drop" };
     if (t.pausedInstances.has(app.entry.ins)) return { kind: "hold" }; // rule 5
     const serving = this.serving(app);
     if (!serving) return { kind: "hold" }; // the serving release is not known to this bridge yet: nothing is decided
-    const op = withStandardOps(serving.manifest).find((o) => o.id === r.op);
+    // per page: the op lookup and the rule-1 answer per (manifest, op, grant shape, authority) are computed once
+    const opKey = `op|${serving.digest}|${r.op}`;
+    if (!memo.has(opKey)) memo.set(opKey, withStandardOps(serving.manifest).find((o) => o.id === r.op) ?? null);
+    const op = memo.get(opKey) as OperationView | null;
     if (!op) return acceptedDigests(app.entry).length > 1 ? { kind: "hold" } : { kind: "drop" };
     const scopeType = op.standard ? null : (op.scopeType ?? null);
     if (scopeType !== r.scope_type) return { kind: "drop" };
     const claims = validGrant(t, r.agent, r.ins, now);
     if (!t.agents.has(r.agent as AgentId) || !claims) return { kind: "drop" };
-    if (!eventVisibleToGrant(serving.manifest, { visibleWith: r.op as never }, claims, r.authority === "owner" || r.authority === "bounded" ? r.authority : null)) return { kind: "drop" };
+    const authority = r.authority === "owner" || r.authority === "bounded" ? r.authority : null;
+    const visKey = `vis|${serving.digest}|${r.op}|${claims.mode}|${[...claims.wf].sort().join(",")}|${[...claims.crud].sort().join(",")}|${authority}`;
+    if (!memo.has(visKey)) memo.set(visKey, eventVisibleToGrant(serving.manifest, { visibleWith: r.op as never }, claims, authority));
+    if (memo.get(visKey) !== true) return { kind: "drop" };
     const { summary, ...rest } = JSON.parse(r.envelope) as Omit<AgentEvent, "id" | "origin">;
-    const strip = summary !== undefined && this.#hookMatches(t, app, op); // rule 6
+    const hookKey = `hook|${r.ins}|${r.op}`;
+    if (summary !== undefined && !memo.has(hookKey)) memo.set(hookKey, this.#hookMatches(t, app, op));
+    const strip = summary !== undefined && memo.get(hookKey) === true; // rule 6
     return { kind: "deliver", event: { id: r.id as AgentEvent["id"], origin: r.origin as AgentEvent["origin"], ...rest, ...(summary !== undefined && !strip ? { summary } : {}) } };
   }
 
@@ -537,6 +642,7 @@ export class EventStore {
   page(t: Table, agent: string, after: string | null, limit: number): AgentEvent[] {
     const out: AgentEvent[] = [];
     const now = this.now();
+    const memo = new Map<string, unknown>();
     let from = after ?? "";
     this.#tx(() => {
       for (;;) {
@@ -544,7 +650,7 @@ export class EventStore {
         const batch = this.#s("SELECT * FROM rows WHERE agent = ? AND held = 0 AND id > ? ORDER BY id LIMIT ?").all(agent, from, Math.max(want, 50)) as unknown as RowRecord[];
         for (const r of batch) {
           from = r.id;
-          const v = this.#verdict(t, r, now);
+          const v = this.#verdict(t, r, now, memo);
           if (v.kind === "drop") {
             this.#s("DELETE FROM rows WHERE id = ?").run(r.id);
             this.#counts.delete(agent);
@@ -602,7 +708,8 @@ export class EventStore {
       const app = t.apps.get(ins as InstanceId);
       const claims = validGrant(t, agent, ins, now);
       const serving = app ? this.serving(app) : undefined;
-      if (!app || !claims || !serving) continue;
+      // as tools/list: a paused or down instance lists nothing now
+      if (!app || app.down || t.pausedInstances.has(app.entry.ins) || !claims || !serving) continue;
       const m = serving.manifest;
       for (const d of m.events ?? []) {
         const scoped = eventScopeType(m, d) !== null;
@@ -639,6 +746,88 @@ export class EventStore {
   exec(sql: string, ...params: SQLInputValue[]): void {
     this.#db.prepare(sql).run(...params);
     this.#counts.clear();
+  }
+}
+
+/** The schema of events.db (STRICT tables). */
+function createSchema(db: DatabaseSync): void {
+  db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL) STRICT;
+    CREATE TABLE IF NOT EXISTS rows (
+      id TEXT PRIMARY KEY,
+      origin TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      ins TEXT NOT NULL,
+      product TEXT NOT NULL,
+      type TEXT NOT NULL,
+      instance_id TEXT,
+      digest TEXT NOT NULL,
+      op TEXT NOT NULL,
+      scope_type TEXT,
+      authority TEXT,
+      envelope TEXT NOT NULL,
+      ingest_at INTEGER NOT NULL,
+      held INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS rows_agent_id ON rows (agent, id);
+    CREATE INDEX IF NOT EXISTS rows_agent_ingest ON rows (agent, ingest_at, origin);
+    CREATE INDEX IF NOT EXISTS rows_scope ON rows (ins, instance_id, agent);
+    CREATE INDEX IF NOT EXISTS rows_held ON rows (held) WHERE held = 1;
+    CREATE INDEX IF NOT EXISTS rows_ingest ON rows (ingest_at);
+    CREATE TABLE IF NOT EXISTS agents (agent TEXT PRIMARY KEY, dropped_through TEXT, held_dropped INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE TABLE IF NOT EXISTS keys (ins TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (ins, key)) STRICT;
+    CREATE INDEX IF NOT EXISTS keys_at ON keys (at);
+    CREATE TABLE IF NOT EXISTS manifests (digest TEXT PRIMARY KEY, json TEXT NOT NULL) STRICT;
+  `);
+  const schema = db.prepare("SELECT v FROM meta WHERE k = 'schema'").get() as { v: string } | undefined;
+  if (!schema) db.prepare("INSERT INTO meta (k, v) VALUES ('schema', ?)").run(SCHEMA_VERSION);
+  else if (schema.v !== SCHEMA_VERSION) throw new Error(`events.db schema ${schema.v} is not ${SCHEMA_VERSION}`);
+  db.prepare("SELECT count(*) FROM rows").get();
+}
+
+/**
+ * Opens events.db; a file that fails to open or to pass the schema check is moved aside (`events.db.corrupt-<ms>`, with its
+ * -wal/-shm) and a fresh log is created (ids continue from the clock: a ULID is time-ordered). A second failure throws (the
+ * caller then runs the bridge without the event log and without the `events` cap).
+ */
+function openDatabase(path: string, log: Logger, now: () => number): { db: DatabaseSync; lastId: string } {
+  const attempt = (): { db: DatabaseSync; lastId: string } => {
+    const db = new DatabaseSync(path);
+    try {
+      createSchema(db);
+      const stored = (db.prepare("SELECT v FROM meta WHERE k = 'last_id'").get() as { v: string } | undefined)?.v ?? "";
+      const maxRow = (db.prepare("SELECT max(id) AS m FROM rows").get() as { m: string | null }).m ?? "";
+      return { db, lastId: stored > maxRow ? stored : maxRow };
+    } catch (e) {
+      try {
+        db.close();
+      } catch {
+        /* already unusable */
+      }
+      throw e;
+    }
+  };
+  try {
+    return attempt();
+  } catch (e) {
+    const aside = `${path}.corrupt-${now()}`;
+    log.error("bridge.events.db_unusable", { code: e instanceof Error ? e.message.slice(0, 120) : "error", movedTo: aside });
+    for (const suffix of ["", "-wal", "-shm"]) if (existsSync(`${path}${suffix}`)) renameSync(`${path}${suffix}`, `${aside}${suffix}`);
+    return attempt();
+  }
+}
+
+/**
+ * The event log, or undefined when it cannot be opened even after moving a bad file aside: the bridge then runs WITHOUT app
+ * events (ingest 503, `tealbrick/events/*` -32601, no `events` cap).
+ */
+export function openEventStore(o: EventStoreOptions): EventStore | undefined {
+  try {
+    return new EventStore(o);
+  } catch (e) {
+    o.log.error("bridge.events.unavailable", { code: e instanceof Error ? e.message.slice(0, 120) : "error" });
+    return undefined;
   }
 }
 

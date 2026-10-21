@@ -13,6 +13,7 @@ import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
+import { EventIngestLimit, type EventStore } from "./events.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
@@ -364,7 +365,7 @@ export class InternalApi {
   private async ingestEvents(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
     const ctx = this.ctx;
     const store = ctx.events;
-    if (!store) throw new BridgeError("app_unavailable", 503, "the event log is not open");
+    if (!store?.healthy) throw new BridgeError("app_unavailable", 503, "the event log is not available; retry");
     const raw = await readBody(req, EVENT_INGEST_MAX_BYTES);
     const caller = this.assertCaller(req, raw);
     // only the claimed APP instance emits (its SDK outbox); a companion service sends no events
@@ -395,7 +396,15 @@ export class InternalApi {
     // the CURRENT table (a swap during the fetch above applied its re-ids first; ingest is one synchronous step)
     const t = ctx.table as Table;
     const app = t.apps.get(caller.ins) as AppRuntime;
-    const { result, agents } = store.ingest(t, app, items);
+    let out: ReturnType<EventStore["ingest"]>;
+    try {
+      out = store.ingest(t, app, items);
+    } catch (e) {
+      // the per-instance stored-row limit (nothing of the batch was stored; the SDK retries the same keys / halves the batch)
+      if (e instanceof EventIngestLimit) return sendError(res, new BridgeError(e.status === 429 ? "rate_limited" : "payload_too_large", e.status, e.message), requestId, e.status === 429 ? { "retry-after": String(e.retryAfterS) } : {});
+      throw new BridgeError("app_unavailable", 503, "the event log failed; retry");
+    }
+    const { result, agents } = out;
     sendJson(res, 200, result);
     if (agents.size) ctx.emit("events-stored", agents);
   }

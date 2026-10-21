@@ -7,7 +7,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { isRefusal } from "@opt2-tealbrick/relay";
 import type { AdminTicketResult, InstanceSlice, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, type ConnectionId, type GrantClaims, LIFETIME_S, type OwnerAssertionClaims, TYP } from "@opt2-tealbrick/spec/credentials";
-import { BRIDGE_CAPS_DECLARED } from "./caps.ts";
+import { bridgeCaps } from "./caps.ts";
 import type { BridgeContext } from "./context.ts";
 import { revokeLocal } from "./identity.ts";
 import { buildTable, internalUrlAllowed, peekClaims, portalKeySet } from "./table.ts";
@@ -71,7 +71,7 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
       ...(s.standalone ?? frozen.standalone ? { standalone: s.standalone ?? frozen.standalone } : {}),
       pause,
       // spec 0.1.54 (C292): a standalone bridge has no Core to copy its caps, so it sets `slice.bridge.caps` itself
-      ...(s.bridge ? { bridge: { ...s.bridge, caps: [...BRIDGE_CAPS_DECLARED] } } : {}),
+      ...(s.bridge ? { bridge: { ...s.bridge, caps: bridgeCaps(ctx) } } : {}),
       grants: overlay.pausedWorkspace ? [] : companion,
       agents: (s.agents ?? []).map((ag) => ({ ...ag, status: overlay.pausedAgents.includes(ag.id) ? "paused" : ag.status })),
     };

@@ -4,13 +4,16 @@
  * not need the wire is here; the wire (ingest auth, MCP methods, SSE frames) is in events-e2e.test.ts.
  */
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import type { AgentEvent } from "@opt2-tealbrick/spec/bridge";
-import { EVENT_RETENTION_ROWS, EventStore, ulidAfter } from "../src/events.ts";
+import { bridgeCaps } from "../src/caps.ts";
+import { EVENT_FANOUT_LIMIT, EVENT_RETENTION_ROWS, EventIngestLimit, EventStore, openEventStore, ulidAfter } from "../src/events.ts";
 import type { Table } from "../src/table.ts";
 import { silentLogger } from "../src/util.ts";
-import { ev, eventsManifest, item, nOf, op, openStore, runtime, table } from "./support/events.ts";
+import { api, ev, eventsManifest, item, nOf, op, openStore, runtime, table } from "./support/events.ts";
 import { AGT, AGT2 } from "./support/world.ts";
 
 const AGT3 = "agt_01HCCCCCCCCCCCCCCCCCCCCCCC";
@@ -526,5 +529,133 @@ describe("rules from @opt2-tealbrick/manifest (L1)", () => {
     const imports = src.slice(0, src.indexOf('from "@opt2-tealbrick/manifest"'));
     for (const name of ["eventDecl", "eventScopeType", "eventVisibleToGrant", "validateEventPayload", "EVENT_KEY_RE", "EVENT_ITEM_MAX_BYTES"]) assert.ok(new RegExp(`\\b${name}\\b`).test(imports), `${name} imported`);
     assert.ok(!/function (eventDecl|eventScopeType|eventVisibleToGrant|validateEventPayload)\b/.test(src));
+  });
+});
+
+describe("review round 1 (bridge#16): limits, failures, documented edges", () => {
+  const many = Array.from({ length: 500 }, (_, i) => `agt_01HM${String(i).padStart(22, "0")}`);
+  const crowd = (o: Partial<Parameters<typeof table>[0]> = {}): Table =>
+    table({ apps: [appA, appB], agents: [...many, AGT], grants: [...many.map((agent) => ({ agent, ins: INS_A })), { agent: AGT, ins: INS_B }], ...o });
+
+  test(`S3: stored rows per app instance are limited (${EVENT_FANOUT_LIMIT.perMinute}/min, burst ${EVENT_FANOUT_LIMIT.burst}); a 500-agent flood is throttled with 429 + Retry-After, nothing of the refused batch is stored, other apps keep arriving`, () => {
+    const s = fresh();
+    const real = s.now;
+    let clock = real();
+    s.now = () => clock;
+    try {
+      const t = crowd();
+      const batch = () => Array.from({ length: 10 }, () => item({ n: 1 }));
+      for (let i = 0; i < 6; i++) assert.equal(s.ingest(t, appA, batch()).result.results[0]?.recipients, 500); // 30 000 rows
+      const refused = batch();
+      assert.throws(
+        () => s.ingest(t, appA, refused),
+        (e: unknown) => e instanceof EventIngestLimit && e.status === 429 && e.retryAfterS >= 1,
+      );
+      assert.equal(s.rows(many[0] as string).length, 60, "nothing of the refused batch was stored");
+      // another app instance is not limited by A's bucket
+      assert.equal(s.ingest(t, appB, [item({ n: 2 })]).result.results[0]?.recipients, 1);
+      // the SDK retries the SAME keys after Retry-After: not duplicates (the keys were not consumed), stored now
+      clock += 60_000;
+      assert.deepEqual(s.ingest(t, appA, refused).result.results.map((x) => x.status), Array(10).fill("stored"));
+    } finally {
+      s.now = real;
+    }
+  });
+
+  test("S3: a batch that alone fans out beyond the burst → 413 (the SDK halves the batch); nothing stored", () => {
+    const s = fresh();
+    assert.throws(
+      () => s.ingest(crowd(), appA, Array.from({ length: 61 }, () => item({ n: 1 }))),
+      (e: unknown) => e instanceof EventIngestLimit && e.status === 413,
+    );
+    assert.equal(s.rows(many[0] as string).length, 0);
+  });
+
+  test("S4b: a rolled-back batch leaves no stale row counts (no false retention deletes afterwards)", () => {
+    const s = fresh();
+    const t = crowd();
+    // AGT holds 9 990 rows of app B
+    for (let i = 0; i < 9_990; i += 100) s.ingest(t, appB, Array.from({ length: Math.min(100, 9_990 - i) }, (_, k) => item({ n: i + k })));
+    // a batch where AGT is one of 501 recipients per item and that is refused (413) after many inserts
+    const both = table({ apps: [appA, appB], agents: [...many, AGT], grants: [...many.map((agent) => ({ agent, ins: INS_A })), { agent: AGT, ins: INS_A }, { agent: AGT, ins: INS_B }] });
+    assert.throws(() => s.ingest(both, appA, Array.from({ length: 60 }, () => item({ n: 1 }))), EventIngestLimit);
+    s.ingest(t, appB, Array.from({ length: 10 }, (_, k) => item({ n: 20_000 + k })));
+    assert.equal(s.rows(AGT).length, 10_000);
+    assert.equal(s.retention(AGT).droppedThrough, null, "nothing was removed: exactly 10 000 rows");
+  });
+
+  test("S2: a database failure marks the store unhealthy (no events cap) until a probe succeeds; onTable never throws", () => {
+    const s = fresh();
+    const t = world();
+    assert.deepEqual(bridgeCaps({ events: s }), ["owner_rows", "events"]);
+    s.exec("CREATE TRIGGER fail_rows BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    assert.throws(() => s.ingest(t, appA, [item({ n: 1 })]));
+    assert.equal(s.healthy, false);
+    assert.deepEqual(bridgeCaps({ events: s }), ["owner_rows"]);
+    s.exec("CREATE TRIGGER fail_manifests BEFORE INSERT ON manifests BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    const other = runtime(INS_A, "notes", { ...mA, version: "9.0.0" });
+    assert.deepEqual(s.onTable(world({ apps: [other, appB] })), { released: 0, dropped: 0 }, "an event-log failure never throws into the config apply");
+    s.exec("DROP TRIGGER fail_rows");
+    s.exec("DROP TRIGGER fail_manifests");
+    assert.equal(s.probe(), true);
+    assert.equal(s.healthy, true);
+    assert.equal(s.ingest(t, appA, [item({ n: 2 })]).result.results[0]?.status, "stored");
+    assert.deepEqual(bridgeCaps({ events: undefined }), ["owner_rows"], "no store: no events cap");
+  });
+
+  test("S2: an unreadable or foreign events.db is moved aside (events.db.corrupt-<ts>) and a fresh log starts; ids stay ULIDs from the clock", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tb-events-corrupt-"));
+    dirs.push(dir);
+    const path = join(dir, "events.db");
+    writeFileSync(path, "this is not a sqlite database at all, just bytes".repeat(100));
+    const s = openEventStore({ path, log: silentLogger, digestOf: (m) => api.manifestDigest(m), hookMatches: () => false });
+    assert.ok(s, "opened after moving the file aside");
+    stores.push(s);
+    assert.ok(readdirSync(dir).some((f) => f.startsWith("events.db.corrupt-")));
+    s.ingest(world(), appA, [item({ n: 1 })]);
+    assert.match(s.rows(AGT)[0]?.id ?? "", /^[0-9A-HJKMNP-TV-Z]{26}$/);
+    // a newer schema version is not read either
+    s.exec("UPDATE meta SET v = '99' WHERE k = 'schema'");
+    s.close();
+    const again = openEventStore({ path, log: silentLogger, digestOf: (m) => api.manifestDigest(m), hookMatches: () => false });
+    assert.ok(again);
+    stores.push(again);
+    assert.equal(again.rows(AGT).length, 0);
+    assert.equal(readdirSync(dir).filter((f) => /^events\.db\.corrupt-\d+$/.test(f)).length, 2);
+    // a path that cannot hold a database at all: no store (the bridge runs without app events)
+    assert.equal(openEventStore({ path: join(dir, "missing", "dir", "events.db"), log: silentLogger, digestOf: () => "", hookMatches: () => false }), undefined);
+    assert.ok(!existsSync(join(dir, "missing")));
+  });
+
+  test("S4c (documented, spec-literal): a re-id'd row the agent already read under its old id, later removed by retention, answers truncated: true", () => {
+    const s = fresh();
+    const real = s.now;
+    let clock = real();
+    s.now = () => clock;
+    try {
+      s.ingest(world(), appA, [item({ n: 1 })]);
+      const read = poll(s, world(), AGT); // delivered under its first id
+      assert.deepEqual(ns(read.events), [1]);
+      // a stale reader (cursor null) reaches it while the instance is paused: held, then re-id'd on resume
+      poll(s, world({ pausedInstances: [INS_A] }), AGT, null);
+      s.onTable(world());
+      clock += 2 * DAY;
+      s.ingest(world(), appB, [item({ n: 2 })]);
+      clock += 5 * DAY + 1000; // the n=1 row is past 7 days from ingest
+      const p = poll(s, world(), AGT, read.cursor);
+      // BRIDGE §14.3 as written: droppedThrough (the row's NEW id) > the cursor → truncated, although the agent had read it
+      assert.equal(p.truncated, true);
+      assert.deepEqual(ns(p.events), [2]);
+    } finally {
+      s.now = real;
+    }
+  });
+
+  test("S4e: events/list skips paused and down instances, as tools/list does", () => {
+    const s = fresh();
+    assert.ok(s.list(world(), AGT).types.some((x) => x.app === "notes"));
+    assert.ok(!s.list(world({ pausedInstances: [INS_A] }), AGT).types.some((x) => x.app === "notes"));
+    assert.ok(!s.list(world({ apps: [{ ...appA, down: true }, appB] }), AGT).types.some((x) => x.app === "notes"));
+    assert.ok(s.list(world({ pausedInstances: [INS_A] }), AGT).types.some((x) => x.app === "memo"));
   });
 });

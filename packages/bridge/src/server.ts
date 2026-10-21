@@ -12,7 +12,7 @@ import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
 import { CallRouter, eventHookMatches } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
-import { EventStore } from "./events.ts";
+import { openEventStore } from "./events.ts";
 import { InternalApi } from "./internal.ts";
 import { type McpLimits, McpServer } from "./mcp.ts";
 import { OAuthServer } from "./oauth.ts";
@@ -222,10 +222,17 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);
   // BRIDGE §14 (0.2.7): the event log lives next to the bridge state; opened before the first config is applied, so the
   // table listener that releases held rows (instance resume, G2b switch) runs first, in the same step as the swap
-  const events = new EventStore({ path: join(dataDir, "bridge", "events.db"), log: logger, digestOf: (m) => o.api.manifestDigest(m), hookMatches: eventHookMatches });
+  // A store that cannot be opened (even after moving a bad file aside) leaves the bridge WITHOUT app events: no `events` cap,
+  // ingest 503, methods -32601. Event-log errors never fail a config apply or another table listener.
+  const events = openEventStore({ path: join(dataDir, "bridge", "events.db"), log: logger, digestOf: (m) => o.api.manifestDigest(m), hookMatches: eventHookMatches, onHealth: () => ctx.emit("health") });
   ctx.events = events;
   ctx.on("table", (next: Table | undefined) => {
-    if (next) events.onTable(next);
+    if (!next || !events) return;
+    try {
+      events.onTable(next);
+    } catch (e) {
+      logger.error("bridge.events.table_failed", { code: e instanceof Error ? e.message.slice(0, 120) : "error" });
+    }
   });
   const s2 = state.loadConfigJws();
   if (s2) {
@@ -378,7 +385,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       publicServer.closeAllConnections();
       internalServer.closeAllConnections();
       await Promise.all([new Promise((r) => publicServer.close(r)), new Promise((r) => internalServer.close(r))]);
-      events.close();
+      events?.close();
     },
   };
   return running;

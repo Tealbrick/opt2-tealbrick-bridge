@@ -11,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
+import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
 import { type Agent, agentSession, ev, eventsManifest, item, nOf, op, postEvents } from "./support/events.ts";
 import { AGT, AGT2, CON, INS, makeWorld, type World, waitFor } from "./support/world.ts";
@@ -316,5 +317,129 @@ describe("rule 6 on the wire: the guard app's before hook strips the summary (br
     okResult(await postEvents(e.w, e.appKey, [item({ n: 2, summary: "Body text" })]));
     const p2 = await a1.rpc("tealbrick/events/poll", { cursor: p1.result.cursor });
     assert.equal(p2.result.events[0].summary, "Body text");
+  });
+});
+
+describe("review round 1 (bridge#16) S1: an open stream is re-authorized before every flush (bridge 0.2.7)", () => {
+  let e: EvWorld;
+  const CON3 = "con_01HCCCCCCCCCCCCCCCCCCCCCCC";
+  const CON4 = "con_01HDDDDDDDDDDDDDDDDDDDDDDD";
+  before(async () => {
+    e = await eventsWorld();
+    await e.w.amend((c) => {
+      for (const con of [CON3, CON4]) c.connections.push({ con, agt: AGT, method: "key", gen: 1, publicKey: e.w.agentKey.publicJwk, status: "active" } as never);
+    });
+    await waitFor(() => e.w.bridge.ctx.table?.connections.has(CON4 as never) === true, 15000);
+  });
+  after(async () => {
+    await e.w.close();
+  });
+
+  const openStream = async (con: string, token?: string) => {
+    const a = await agentSession(e.w, AGT, con, token);
+    const st = await a.rpc("tealbrick/events/stream", { cursor: "7ZZZZZZZZZZZZZZZZZZZZZZZZY" });
+    assert.ok(st.result, JSON.stringify(st));
+    // from the current end: a fresh poll cursor
+    let cursor: string | null = null;
+    for (;;) {
+      const p = await a.rpc("tealbrick/events/poll", { ...(cursor ? { cursor } : {}), limit: 100 });
+      cursor = p.result.cursor;
+      if (p.result.events.length < 100) break;
+    }
+    await a.rpc("tealbrick/events/stream", cursor ? { cursor } : {});
+    const l = a.listen();
+    await l.ready;
+    return { a, l };
+  };
+
+  for (const variant of ["revoked by a config swap", "gen rotated by a config swap"] as const) {
+    test(`C274f: event A delivered; the connection is ${variant} mid-stream; event B → no frame, no summary text of B on the socket, the stream and session are ended`, async () => {
+      const con = variant.startsWith("revoked") ? CON3 : CON4;
+      const { a, l } = await openStream(con);
+      try {
+        okResult(await postEvents(e.w, e.appKey, [item({ n: 1, summary: "summary-of-A" })]));
+        await l.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 1);
+        await e.w.amend((c) => {
+          const entry = c.connections.find((x) => x.con === con) as unknown as Record<string, unknown>;
+          if (variant.startsWith("revoked")) entry.status = "revoked";
+          else entry.gen = 2;
+        });
+        await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
+        okResult(await postEvents(e.w, e.appKey, [item({ n: 2, summary: "SECRET-summary-of-B" })]));
+        await waitFor(() => l.ended(), 3000);
+        await sleep(300);
+        assert.ok(!l.frames.some((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 2), "no frame for B");
+        assert.ok(!l.raw().includes("SECRET-summary-of-B"), "no summary text of B on the socket");
+        assert.ok(l.raw().includes("summary-of-A"), "A was delivered before");
+        const after = await e.w.mcp(a.token, { jsonrpc: "2.0", id: 99, method: "tealbrick/events/poll", params: {} }, a.sid);
+        assert.equal(after.status, 401, "the old token no longer authenticates");
+      } finally {
+        l.close();
+      }
+    });
+  }
+
+  test("a stream ends at its token's expiry (the client reconnects with a fresh token and Last-Event-ID)", async () => {
+    const ctx = e.w.bridge.ctx;
+    const id = ctx.identity;
+    assert.ok(id && ctx.table);
+    const now = Math.floor(Date.now() / 1000);
+    const short = await ctx.api.signJws(TYP.agentSession, { iss: ctx.bridgeRef, sub: `tb:agt:${AGT}`, aud: ctx.bridgeRef, iat: now, exp: now + 3, jti: ctx.api.ulid(), ws: ctx.table.ws, con: CON, gen: 1 } as never, id.key);
+    const { l } = await openStream(CON, short);
+    try {
+      await waitFor(() => l.ended(), 6000);
+      okResult(await postEvents(e.w, e.appKey, [item({ n: 3, summary: "after-expiry" })]));
+      await sleep(300);
+      assert.ok(!l.raw().includes("after-expiry"));
+    } finally {
+      l.close();
+    }
+  });
+});
+
+describe("review round 1 (bridge#16) S2: event-log failures never take the bridge down (bridge 0.2.7)", () => {
+  let e: EvWorld;
+  before(async () => {
+    e = await eventsWorld();
+  });
+  after(async () => {
+    await e.w.close();
+  });
+
+  test("a database failure → ingest 503, events methods -32601, StatusReports without events; recovered by the probe → events again", async () => {
+    const store = e.w.bridge.ctx.events;
+    assert.ok(store);
+    const a1 = await agentSession(e.w, AGT, CON);
+    store.exec("CREATE TRIGGER fail_rows BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    assert.equal((await postEvents(e.w, e.appKey, [item({ n: 1 })])).status, 503);
+    assert.equal((await postEvents(e.w, e.appKey, [item({ n: 1 })])).status, 503, "unhealthy: refused before the store");
+    assert.equal((await a1.rpc("tealbrick/events/list")).error?.code, -32601);
+    const acks = e.w.acks.length;
+    await waitFor(() => e.w.acks.length > acks && !(e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"), 15000);
+    // config applies still work while the store is down
+    await e.w.publish();
+    await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev(), 15000);
+    store.exec("DROP TRIGGER fail_rows");
+    assert.equal(store.probe(), true);
+    await waitFor(() => (e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"), 15000);
+    okResult(await postEvents(e.w, e.appKey, [item({ n: 2 })]));
+    assert.ok((await a1.rpc("tealbrick/events/list")).result);
+  });
+
+  test("a corrupt events.db at boot is moved aside; the bridge starts with a fresh log and declares events", async () => {
+    const { writeFileSync, readdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    await e.w.bridge.stop();
+    const dir = join(e.w.dataDir, "bridge");
+    for (const f of ["events.db-wal", "events.db-shm"]) writeFileSync(join(dir, f), "");
+    writeFileSync(join(dir, "events.db"), "garbage ".repeat(1000));
+    await e.w.restart();
+    await waitFor(() => e.w.bridge.ctx.table?.rev === e.w.rev() && !!e.w.bridge.ctx.table?.apps.get(INS as never)?.manifest, 15000);
+    assert.ok(readdirSync(dir).some((f) => f.startsWith("events.db.corrupt-")));
+    assert.equal(e.w.bridge.ctx.events?.healthy, true);
+    okResult(await postEvents(e.w, e.appKey, [item({ n: 3 })]));
+    const acks = e.w.acks.length;
+    await waitFor(() => e.w.acks.length > acks, 15000);
+    assert.ok((e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"));
   });
 });

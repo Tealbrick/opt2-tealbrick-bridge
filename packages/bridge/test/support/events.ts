@@ -152,6 +152,10 @@ export interface SseFrame {
 
 export interface Listener {
   frames: SseFrame[];
+  /** every byte the stream carried (decoded) */
+  raw(): string;
+  /** the server ended the stream */
+  ended(): boolean;
   ready: Promise<void>;
   close(): void;
   /** resolves when a frame matches, rejects after `ms` */
@@ -165,8 +169,8 @@ export interface Agent {
   listen(lastEventId?: string): Listener;
 }
 
-export async function agentSession(w: World, agt: string, con: string): Promise<Agent> {
-  const token = await w.agentTokenFor(agt, con);
+export async function agentSession(w: World, agt: string, con: string, tokenIn?: string): Promise<Agent> {
+  const token = tokenIn ?? (await w.agentTokenFor(agt, con));
   const init = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "events-test" } } });
   const sid = init.session as string;
   let id = 10;
@@ -181,6 +185,8 @@ export async function agentSession(w: World, agt: string, con: string): Promise<
 function listen(w: World, token: string, sid: string, lastEventId?: string): Listener {
   const ac = new AbortController();
   const frames: SseFrame[] = [];
+  let all = "";
+  let done = false;
   let onReady: () => void = () => undefined;
   const ready = new Promise<void>((r) => {
     onReady = r;
@@ -190,10 +196,12 @@ function listen(w: World, token: string, sid: string, lastEventId?: string): Lis
     const reader = (r.body as ReadableStream<Uint8Array>).getReader();
     let buf = "";
     for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
+      const { value, done: end } = await reader.read();
+      if (end) break;
       onReady();
-      buf += Buffer.from(value).toString("utf8");
+      const text = Buffer.from(value).toString("utf8");
+      all += text;
+      buf += text;
       for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
         const block = buf.slice(0, i);
         buf = buf.slice(i + 2);
@@ -206,9 +214,12 @@ function listen(w: World, token: string, sid: string, lastEventId?: string): Lis
         if (data) frames.push({ ...(fid !== undefined ? { id: fid } : {}), msg: JSON.parse(data) });
       }
     }
+    done = true;
   })().catch(() => undefined);
   return {
     frames,
+    raw: () => all,
+    ended: () => done,
     ready,
     close: () => ac.abort(),
     until: async (pred, ms = 3000) => {
