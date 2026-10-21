@@ -7,12 +7,13 @@ import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MCP_VERSIONS, tooDeep, validRpcId } from "@opt2-tealbrick/relay";
 import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec/bridge";
-import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
+import { EVENT_MCP_METHODS, TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { type CallRouter, RESOLVE_TTL_MS } from "./calls.ts";
 import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
+import { EVENT_POLL_LIMIT, isEventCursor, pollLimit } from "./events.ts";
 import { authenticateAgent } from "./identity.ts";
 import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
 import { agtRef, grantKey, insRef, type Table } from "./table.ts";
@@ -28,6 +29,11 @@ interface Session {
   toolDigest: string;
   skillsDigest: string;
   lastSeen: number;
+  /** BRIDGE §14.3 (0.2.7): the event subscription of this session (`tealbrick/events/stream`); `cursor` = the last event id
+   *  framed (null = from the oldest kept). One per session: a second `stream` call replaces it. */
+  events?: { cursor: string | null };
+  /** a frame flush is scheduled */
+  flushQueued?: boolean;
 }
 
 interface RpcRequest {
@@ -53,7 +59,14 @@ export const MCP_LIMITS = Object.freeze({
   dynamicIndexTtlMs: RESOLVE_TTL_MS,
   /** C296: an index built while a dynamic catalog failed is retried after this */
   incompleteIndexRetryMs: 30_000,
+  /** BRIDGE §14.3 (0.2.7): `tealbrick/events/*` requests per connection (their own bucket: a backlog of 10 000 rows is 100 polls) */
+  eventsRatePerS: 20,
+  eventsBurst: 200,
 });
+
+/** A POST body up to this size (declared Content-Length) is read before the rate check, to find `tealbrick/events/*` reads. */
+const EVENTS_PEEK_MAX = 4096;
+const EVENT_METHOD_PREFIX = "tealbrick/events/";
 
 export type McpLimits = { -readonly [K in keyof typeof MCP_LIMITS]: number };
 
@@ -72,6 +85,7 @@ export class McpServer {
   private readonly rebuilding = new Set<string>();
   private readonly limits: McpLimits;
   private readonly postBucket: TokenBucket;
+  private readonly eventsBucket: TokenBucket;
   private readonly callsByCon = new Map<string, number>();
   private callsInFlight = 0;
 
@@ -81,9 +95,16 @@ export class McpServer {
     this.router = router;
     this.limits = { ...MCP_LIMITS, ...limits };
     this.postBucket = new TokenBucket(this.limits.ratePerS, this.limits.burst);
+    this.eventsBucket = new TokenBucket(this.limits.eventsRatePerS, this.limits.eventsBurst);
     ctx.on("table", () => {
       this.indexCache.clear();
       void this.notifyChanges();
+      // BRIDGE §14.3: a resume (agent, workspace or instance) releases held rows; subscribed streams pick them up
+      for (const s of this.sessions.values()) this.scheduleFlush(s);
+    });
+    // BRIDGE §14.3: live frames within 1 s of ingest (internal.ts emits the agents that got a row, after the commit)
+    ctx.on("events-stored", (agents: Set<string>) => {
+      for (const s of this.sessions.values()) if (agents.has(s.agt)) this.scheduleFlush(s);
     });
     // C283 A1: the app's scope summary (`admittedOps`) changed → the tool lists are rebuilt and sessions told
     ctx.on("scopes", () => {
@@ -248,6 +269,55 @@ export class McpServer {
     for (const res of s.streams) res.write(data);
   }
 
+  /** BRIDGE §14.3: frames go only to an open GET stream of a subscribed session; one flush at a time per session. */
+  private scheduleFlush(s: Session): void {
+    if (!s.events || s.streams.size === 0 || s.flushQueued) return;
+    s.flushQueued = true;
+    setImmediate(() => {
+      s.flushQueued = false;
+      this.flush(s);
+    });
+  }
+
+  /**
+   * Writes the events after the subscription cursor as `notifications/tealbrick/event` frames (SSE `id:` = event id), moving
+   * the cursor. Nothing while the agent or the workspace is paused (the subscription stays; frames start on resume). A slow
+   * reader is waited for (drain) instead of buffering the whole backlog.
+   */
+  private flush(s: Session): void {
+    const store = this.ctx.events;
+    const t = this.ctx.table;
+    const sub = s.events;
+    if (!store || !t || !sub || s.streams.size === 0 || this.sessions.get(s.id) !== s) return;
+    if (t.pausedWorkspace || t.pausedAgents.has(s.agt)) return;
+    try {
+      for (let pages = 0; pages < 20; pages++) {
+        const evs = store.page(t, s.agt, sub.cursor, EVENT_POLL_LIMIT.max);
+        for (const e of evs) {
+          const data = `id: ${e.id}\nevent: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: EVENT_MCP_METHODS.notification, params: { event: e } })}\n\n`;
+          for (const res of s.streams) res.write(data);
+          sub.cursor = e.id;
+        }
+        if (evs.length < EVENT_POLL_LIMIT.max) return;
+        const slow = [...s.streams].find((r) => r.writableNeedDrain);
+        if (slow) {
+          slow.once("drain", () => this.scheduleFlush(s));
+          return;
+        }
+      }
+      this.scheduleFlush(s);
+    } catch (e) {
+      this.ctx.log.warn("bridge.events.flush_failed", { agt: s.agt, code: e instanceof Error ? e.message.slice(0, 120) : "error" });
+    }
+  }
+
+  /** `cursor` of poll/stream: absent or null = none; a string that is not a ULID this bridge could issue → -32602 cursor_invalid. */
+  private eventCursor(v: unknown): string | null {
+    if (v === undefined || v === null) return null;
+    if (typeof v !== "string" || !isEventCursor(v)) throw new RpcError(-32602, "cursor not issued by this bridge", { code: "cursor_invalid" });
+    return v;
+  }
+
   private endSession(id: string): void {
     const s = this.sessions.get(id);
     if (!s) return;
@@ -302,18 +372,37 @@ export class McpServer {
         clearInterval(ka);
         s.streams.delete(res);
       });
+      // BRIDGE §14.3: a reconnect with Last-Event-ID resumes after it while the session holds its subscription
+      const last = headerValue(req, "last-event-id");
+      if (s.events && last && isEventCursor(last)) s.events.cursor = last;
+      this.scheduleFlush(s);
       return;
     }
     if (req.method !== "POST") {
       res.writeHead(405, { allow: "GET, POST, DELETE" }).end();
       return;
     }
-    const wait = this.postBucket.take(principal.con);
-    if (wait > 0) return this.tooMany(res, requestId, "too many requests for this connection", wait);
+    // BRIDGE §14.3 (0.2.7): `tealbrick/events/*` reads have their own per-connection bucket (a runtime catching up on a
+    // backlog pages through up to 10 000 rows, 100 per poll). A small body (≤ 4 KiB, declared length) is read first to tell
+    // them apart; every other request takes the general bucket BEFORE its body is read, as before.
+    const declared = Number(req.headers["content-length"]);
+    let body: Buffer | undefined;
     let msg: unknown;
     try {
-      const body = await readBody(req, MAX_BODY);
-      msg = JSON.parse(body.toString("utf8"));
+      if (Number.isInteger(declared) && declared >= 0 && declared <= EVENTS_PEEK_MAX) {
+        body = await readBody(req, EVENTS_PEEK_MAX);
+        msg = JSON.parse(body.toString("utf8"));
+      }
+    } catch (e) {
+      if (e instanceof BridgeError) return sendError(res, e, requestId);
+      msg = undefined; // answered below as a parse error, after the general bucket
+    }
+    const eventsRead = isRecord(msg) && typeof msg.method === "string" && msg.method.startsWith(EVENT_METHOD_PREFIX);
+    const wait = (eventsRead ? this.eventsBucket : this.postBucket).take(principal.con);
+    if (wait > 0) return this.tooMany(res, requestId, "too many requests for this connection", wait);
+    try {
+      if (!body) body = await readBody(req, MAX_BODY);
+      if (msg === undefined) msg = JSON.parse(body.toString("utf8"));
     } catch (e) {
       if (e instanceof BridgeError) return sendError(res, e, requestId);
       sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
@@ -386,7 +475,7 @@ export class McpServer {
       // only messages the bridge wrote reach the agent; anything else is a generic internal error (H-7)
       const code = e instanceof RpcError ? e.rpcCode : -32603;
       const message = e instanceof RpcError || e instanceof BridgeError ? e.message : "internal error";
-      sendJson(res, 200, { jsonrpc: "2.0", id: rpc.id, error: { code, message } });
+      sendJson(res, 200, { jsonrpc: "2.0", id: rpc.id, error: { code, message, ...(e instanceof RpcError && e.data !== undefined ? { data: e.data } : {}) } });
     }
   }
 
@@ -423,9 +512,29 @@ export class McpServer {
         return { prompts: [] };
       case "tools/call":
         return this.callTool(t, p, rpc.params ?? {}, requestId, signal, s.id);
+      // BRIDGE §14.3 (0.2.7): app events on the agent's existing session
+      case EVENT_MCP_METHODS.list:
+      case EVENT_MCP_METHODS.poll:
+      case EVENT_MCP_METHODS.stream:
+        return this.eventMethod(t, s, rpc);
       default:
         throw new RpcError(-32601, "method not found");
     }
+  }
+
+  private eventMethod(t: Table, s: Session, rpc: RpcRequest): unknown {
+    const store = this.ctx.events;
+    if (!store) throw new RpcError(-32601, "method not found");
+    const params = isRecord(rpc.params) ? rpc.params : {};
+    const paused = t.pausedWorkspace || t.pausedAgents.has(s.agt);
+    if (rpc.method === EVENT_MCP_METHODS.list) return store.list(t, s.agt);
+    const cursor = this.eventCursor(params.cursor);
+    if (rpc.method === EVENT_MCP_METHODS.poll) return store.poll(t, s.agt, cursor, pollLimit(params.limit), paused);
+    const r = store.stream(s.agt, cursor, paused);
+    // one subscription per session: this call replaces any earlier one and the backlog after `cursor` is framed again
+    s.events = { cursor: r.cursor };
+    this.scheduleFlush(s);
+    return r;
   }
 
   private async callTool(t: Table, p: Principal, params: Record<string, unknown>, requestId: string, signal: AbortSignal, sessionId = ""): Promise<unknown> {
@@ -532,9 +641,11 @@ export class McpServer {
 
 class RpcError extends Error {
   readonly rpcCode: number;
-  constructor(code: number, message: string) {
+  readonly data: unknown;
+  constructor(code: number, message: string, data?: unknown) {
     super(message);
     this.rpcCode = code;
+    this.data = data;
   }
 }
 

@@ -190,7 +190,7 @@ export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown
   });
 }
 
-async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Promise<Manifest> {
+export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Promise<Manifest> {
   const res = await ctx.fetch(new URL("/tb/v1/manifest", app.internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new ManifestError(`fetch_http_${res.status}`);
   const v = ctx.api.validateManifest(await res.json());

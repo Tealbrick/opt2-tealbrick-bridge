@@ -1,0 +1,13 @@
+# Changelog
+
+One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
+
+## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
+
+- **Ingest** `POST /tb/v1/events` on the internal listener (BRIDGE §14.1): instance assertion of the claimed app instance (`htm`, `htu`, `bd`); a companion service → 403; body ≤ 512 KiB, 1..100 items processed in order with one result per item; 429 from the companion-call bucket of the instance; 503 `app_not_claimed` for an instance the config does not list. Per item the §14.1 steps in order (declaration, shape and size, scoped ⇔ `instanceId` + `eligible`, target ⇔ `to`, dedupe of `(app instance, key)` for 7 days, emits and purges alike), with the shared rules of `@opt2-tealbrick/manifest` 0.1.30.
+- **Per-agent log** in `node:sqlite` (`<TB_DATA_DIR>/bridge/events.db`; no new npm dependency): ULID ids strictly increasing per bridge (also after a clock step back and a restart), `origin`, the recorded declaration (manifest digest, `visibleWith` op, its scope type), the `eligible` authority, the envelope, ingest time, `held`. Retention per agent: 7 days from ingest or 10 000 rows (oldest by ingest first), `droppedThrough` and a held-row-removed flag answered once as `truncated: true`.
+- **Fan-out at write** by MANIFEST §16.2 rules 1–4 (the tools/list rule via `eventVisibleToGrant`, `eligible` with its per-entry authority, never outside it, never to `causedBy`, `to` for target events). **Re-check at delivery** of rules 1, 5 and 6 against the current table and the current serving manifest; pause and G2b waits hold rows, which get new ids (same `origin`, old order) in the same step as the resume or the switch; a rollback drops them. A matching enabled before/after hook strips `summary`.
+- **Purges** per agent + instance and for every agent of an instance (delivered or not).
+- **MCP**: `tealbrick/events/list`, `tealbrick/events/poll`, `tealbrick/events/stream` on the agent's existing session; `notifications/tealbrick/event` frames on the GET stream with SSE `id:` = event id (no `id:` on other frames), `Last-Event-ID` resume, a second `stream` replaces the subscription and re-sends the backlog; `cursor_invalid` → -32602; paused → `paused: true`. Event reads have their own per-connection rate bucket (20/s, burst 200).
+- **Cap** `events` in `StatusReport.bridge.caps` (and in re-minted standalone slices), next to `owner_rows`.
+- Pins: `@opt2-tealbrick/spec` 0.1.57, `@opt2-tealbrick/manifest` 0.1.30 (also for the relay's validator: a manifest with `events` needs it), conformance 0.1.28, miniapp-sdk 0.1.38 (tests).

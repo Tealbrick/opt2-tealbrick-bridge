@@ -10,6 +10,7 @@ import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
+import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
@@ -97,6 +98,8 @@ export class BridgeContext extends EventEmitter {
    */
   readonly admittedOps = new Map<string, ReadonlySet<string>>();
   readonly rejected = new Map<string, number>();
+  /** BRIDGE §14 (0.2.7): the per-agent event log (events.ts); set by startBridge before the first config is applied */
+  events: EventStore | undefined;
   /** v0.1.14: connection → last authentication (ms) since the previous accepted status report (insertion = recency) */
   readonly connectionsSeen = new Map<string, number>();
   /** record an authenticated connection (most recent last; capped) */

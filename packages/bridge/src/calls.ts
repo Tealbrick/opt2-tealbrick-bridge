@@ -143,8 +143,26 @@ export const PARENT_CALL_TTL_MS = 120_000;
 /** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
 class HookBadAnswer extends Error {}
 
-function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Target, op: OperationView): boolean {
+function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Pick<Target, "app">, op: OperationView): boolean {
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
+}
+
+/**
+ * MANIFEST §16.2 rule 6 (bridge 0.2.7): does a `before` or `after` hook match a call of `op` on `app`? An enabled listed hook
+ * (the same match as the call path), or one a deployed app DECLARES that the config does not list (the call path refuses such a
+ * call `hook_failed`, C117; for an event the bridge fails closed the same way: no summary). Listed with `enabled: false` = the
+ * owner switched it off: no match.
+ */
+export function eventHookMatches(t: Table, app: AppRuntime, op: OperationView): boolean {
+  const target = { app };
+  if (t.hooks.some((h) => (h.phase === "before" || h.phase === "after") && h.enabled !== false && hookMatches(h.match, target, op))) return true;
+  const listed = new Set(t.hooks.map((h) => `${h.ins}|${h.hookId}`));
+  for (const a of t.apps.values()) {
+    for (const d of a.declaredHooks) {
+      if ((d.phase === "before" || d.phase === "after") && !listed.has(`${a.entry.ins}|${d.id}`) && hookMatches(d.match ?? { products: ["*"] }, target, op)) return true;
+    }
+  }
+  return false;
 }
 
 export class CallRouter {

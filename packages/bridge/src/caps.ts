@@ -13,7 +13,10 @@
  *    that the app's scope summary names in `admittedOps` (tools.ts `visibleOps`, internal.ts `refreshScopeSummary`); the
  *    dynamic catalog body carries `agent` and an entry marked `admitted: "owner"` is listed (calls.ts `catalog`, tools.ts
  *    `buildToolIndex`); and gate() is the manifest >= 0.1.27 gate that skips `op.crud ⊆ grant.crud` for scoped ops.
+ *  - `events` = app events, ALL of BRIDGE §14 (spec 0.1.57, bridge 0.2.7): ingest `POST /tb/v1/events` (internal.ts
+ *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
+ *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
-export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows"];
+export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows", "events"];

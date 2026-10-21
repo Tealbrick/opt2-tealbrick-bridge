@@ -1,6 +1,6 @@
 /**
  * Bridge 0.2.5 (spec 0.1.54, C292 / C292a): `StatusReport.bridge.caps`. The bridge declares ONLY what it implements:
- * `owner_rows` = the C283 A1 owner-row filter. Core copies the set into the slices; a standalone bridge writes it into
+ * `owner_rows` = the C283 A1 owner-row filter; `events` (bridge 0.2.7, spec 0.1.57) = all of BRIDGE §14 (app events). Core copies the set into the slices; a standalone bridge writes it into
  * the slices it re-mints itself. Caps are advisory and never widen access.
  *
  * The cap list is a constant in caps.ts, tied to its feature by a probe per entry (below): a cap whose behaviour is
@@ -23,6 +23,20 @@ const now = () => Math.floor(Date.now() / 1000);
 
 /** one probe per cap: true when the build really has the behaviour the cap names */
 const PROBES: Record<string, (w: World) => Promise<void>> = {
+  // BRIDGE §14: the ingest route answers (an unauthenticated batch is refused 401, not 404), the event log is open, and the
+  // three methods answer on an MCP session (not -32601); the full behaviour is events-store.test.ts and events-e2e.test.ts
+  events: async (w) => {
+    assert.ok(w.bridge.ctx.events, "the event log is open");
+    const r = await fetch(`${w.internalUrl}/tb/v1/events`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [] }) });
+    await r.body?.cancel();
+    assert.equal(r.status, 401);
+    const token = await w.agentToken();
+    const init = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "caps" } } });
+    for (const method of ["tealbrick/events/list", "tealbrick/events/poll", "tealbrick/events/stream"]) {
+      const a = await w.mcp(token, { jsonrpc: "2.0", id: 2, method, params: {} }, init.session ?? undefined);
+      assert.ok(a.json?.result && !a.json.error, `${method}: ${JSON.stringify(a.json)}`);
+    }
+  },
   owner_rows: async (w) => {
     const t = w.bridge.ctx.table;
     const app = t?.apps.get(INS as never);
@@ -54,8 +68,8 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.close();
   });
 
-  test("the bridge declares exactly owner_rows, and only values the spec knows", () => {
-    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows"]);
+  test("the bridge declares exactly owner_rows and events, and only values the spec knows", () => {
+    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events"]);
     for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 
@@ -64,11 +78,11 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.publish();
     await waitFor(() => w.acks.some((a) => a.rev === w.rev()), 15000);
     assert.ok(w.acks.length >= 2, `reports received: ${w.acks.length}`);
-    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows"], `report rev ${a.rev}`);
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows"]);
+    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events"], `report rev ${a.rev}`);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events"]);
     // a copy: changing a report never changes what the next one says
     (buildStatusReport(w.bridge.ctx).bridge.caps as string[]).push("x");
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows"]);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events"]);
   });
 
   test("every declared cap has a probe, and the probe passes (the behaviour the cap names exists in this build)", async () => {
@@ -80,7 +94,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "caps.ts")) {
       const text = readFileSync(`${dir}${f}`, "utf8");
-      assert.ok(!/["']owner_rows["']/.test(text), `${f} must take the caps from caps.ts`);
+      assert.ok(!/["'](owner_rows|events)["']/.test(text), `${f} must take the caps from caps.ts`);
     }
   });
 });
@@ -115,7 +129,7 @@ describe("standalone bridge: slice.bridge.caps from its own set (spec 0.1.54)", 
     await waitFor(() => w.bridge.ctx.table?.standalone === true && w.bridge.ctx.table?.config.iss === w.bridge.ctx.bridgeRef, 15000);
     const slice = w.bridge.ctx.table?.config.apps.find((a) => a.ins === INS)?.slice as string;
     const claims = JSON.parse(Buffer.from(slice.split(".")[1] as string, "base64url").toString("utf8")) as { bridge?: { id?: string; keys?: unknown[]; caps?: string[] } };
-    assert.deepEqual(claims.bridge?.caps, ["owner_rows"]);
+    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events"]);
     assert.equal(claims.bridge?.id, BRG, "the rest of the bridge member is kept");
     assert.equal(claims.bridge?.keys?.length, 1);
   });

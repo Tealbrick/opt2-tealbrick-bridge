@@ -10,8 +10,9 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
-import { CallRouter } from "./calls.ts";
+import { CallRouter, eventHookMatches } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
+import { EventStore } from "./events.ts";
 import { InternalApi } from "./internal.ts";
 import { type McpLimits, McpServer } from "./mcp.ts";
 import { OAuthServer } from "./oauth.ts";
@@ -20,6 +21,7 @@ import { PersonSurfaces } from "./person.ts";
 import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
+import type { Table } from "./table.ts";
 import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, proxyTrusted, sendError, sendJson, setProxyTrust } from "./util.ts";
 import { ViewsRoute } from "./views-route.ts";
 import { VIEWS_KEY_MIN_LENGTH, type ViewsLimits } from "./views-shared.ts";
@@ -218,6 +220,13 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     ...(o.fetch ? { fetch: o.fetch } : {}),
   });
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);
+  // BRIDGE §14 (0.2.7): the event log lives next to the bridge state; opened before the first config is applied, so the
+  // table listener that releases held rows (instance resume, G2b switch) runs first, in the same step as the swap
+  const events = new EventStore({ path: join(dataDir, "bridge", "events.db"), log: logger, digestOf: (m) => o.api.manifestDigest(m), hookMatches: eventHookMatches });
+  ctx.events = events;
+  ctx.on("table", (next: Table | undefined) => {
+    if (next) events.onTable(next);
+  });
   const s2 = state.loadConfigJws();
   if (s2) {
     await applyConfig(ctx, s2, { boot: true });
@@ -369,6 +378,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       publicServer.closeAllConnections();
       internalServer.closeAllConnections();
       await Promise.all([new Promise((r) => publicServer.close(r)), new Promise((r) => internalServer.close(r))]);
+      events.close();
     },
   };
   return running;
