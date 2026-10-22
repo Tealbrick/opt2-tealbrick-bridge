@@ -11,7 +11,8 @@
  * come from `@opt2-tealbrick/manifest` (L1); nothing here re-implements them. The visibility rule is the tools/list rule
  * (`opVisibleToGrant`, through `eventVisibleToGrant`), with the per-entry authority of `eligible` for scoped events.
  */
-import { existsSync, renameSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, renameSync, statfsSync } from "node:fs";
+import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import {
   EVENT_BATCH_MAX,
@@ -51,6 +52,25 @@ export const EVENT_POLL_LIMIT = { min: 1, max: 100, default: 50 } as const;
  * SDK retries the same keys), or 413 when the batch alone needs more than the burst (the SDK halves the batch).
  */
 export const EVENT_FANOUT_LIMIT = { perMinute: 6_000, burst: 30_000 } as const;
+
+/**
+ * Disk guards (review round 3, S3). The dedupe `keys` table is capped per app instance (oldest keys by `at` go first: a retry
+ * of an evicted key within its 7 days would be stored again, which the SDK's minutes-long retry window never reaches). The log
+ * as a whole is capped by its USED size (`maxBytes`: pages in use, free pages do not count), and ingest is refused while the
+ * volume has less than `minFreeBytes` free, so a runaway app cannot fill the volume that also holds the bridge's identity and
+ * config. Ingest answers 503 `app_unavailable` + Retry-After while a guard holds; deliveries, purges by retention and the
+ * sweep go on and bring the size back down.
+ */
+export const EVENT_KEYS_PER_INSTANCE = 100_000;
+export const EVENT_DB_LIMITS = { maxBytes: 1024 * 1024 * 1024, minFreeBytes: 128 * 1024 * 1024, checkMs: 5_000 } as const;
+/** The log is at its size cap, or the volume is nearly full: ingest is refused (retryable). */
+export class EventStoreFull extends Error {
+  readonly reason: "size" | "free_space";
+  constructor(reason: "size" | "free_space") {
+    super(reason === "size" ? "the event log is at its size limit" : "the volume has too little free space for the event log");
+    this.reason = reason;
+  }
+}
 
 /** A whole-request refusal from the ingest step (the transaction is rolled back; nothing of the batch is stored). */
 export class EventIngestLimit extends Error {
@@ -125,6 +145,12 @@ export interface EventStoreOptions {
   hookMatches: HookMatch;
   /** test clock (ms) */
   now?: () => number;
+  /** disk guards (EVENT_KEYS_PER_INSTANCE, EVENT_DB_LIMITS); tests lower them */
+  keysPerInstance?: number;
+  maxBytes?: number;
+  minFreeBytes?: number;
+  /** free bytes on the volume of the log (default: statfs of its directory); tests fake it */
+  freeBytes?: () => number;
   /** told when the `events` cap is withdrawn or restored (the status report re-states the caps); never inside the 5 min window */
   onHealth?: (available: boolean) => void;
 }
@@ -160,6 +186,15 @@ export class EventStore {
   #goodProbes = 0;
   #openFailureLogged = false;
   readonly #onHealth: ((available: boolean) => void) | undefined;
+  readonly #keysPerInstance: number;
+  readonly #maxBytes: number;
+  readonly #minFreeBytes: number;
+  readonly #freeBytes: () => number;
+  /** dedupe keys per app instance (a cache; dropped on rollback and bulk deletes) */
+  readonly #keyCounts = new Map<string, number>();
+  /** the last disk-guard check (ms) and its verdict */
+  #spaceAt: number | null = null;
+  #spaceVerdict: "ok" | "size" | "free_space" = "ok";
   /** stored recipient rows per app instance (BRIDGE §14.1 fan-out limit): tokens and the time they were counted */
   readonly #fanout = new Map<string, { tokens: number; at: number }>();
 
@@ -169,6 +204,19 @@ export class EventStore {
     this.#digestOf = o.digestOf;
     this.#hookMatches = o.hookMatches;
     this.#onHealth = o.onHealth;
+    this.#keysPerInstance = o.keysPerInstance ?? EVENT_KEYS_PER_INSTANCE;
+    this.#maxBytes = o.maxBytes ?? EVENT_DB_LIMITS.maxBytes;
+    this.#minFreeBytes = o.minFreeBytes ?? EVENT_DB_LIMITS.minFreeBytes;
+    this.#freeBytes =
+      o.freeBytes ??
+      (() => {
+        try {
+          const f = statfsSync(dirname(o.path));
+          return Number(f.bavail) * Number(f.bsize);
+        } catch {
+          return Number.POSITIVE_INFINITY; // unknown: the size cap still holds
+        }
+      });
     this.now = o.now ?? Date.now;
     this.#open();
     this.#sweep = setInterval(() => this.sweep(), EVENT_STORE_HEALTH.probeMs);
@@ -183,6 +231,9 @@ export class EventStore {
    */
   #open(): boolean {
     const attempt = (): DatabaseSync => {
+      // review round 3 (S4): the log holds event summaries in plain text, so the file is created 0600 (SQLite gives -wal and -shm the
+      // same mode); an existing file is tightened after the open below
+      if (!existsSync(this.#path)) closeSync(openSync(this.#path, "a", 0o600));
       const db = new DatabaseSync(this.#path);
       try {
         createSchema(db);
@@ -231,6 +282,15 @@ export class EventStore {
     this.#db = db;
     this.#stmt = {};
     this.#counts.clear();
+    this.#keyCounts.clear();
+    this.#spaceAt = null;
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        if (existsSync(`${this.#path}${suffix}`)) chmodSync(`${this.#path}${suffix}`, 0o600);
+      } catch {
+        /* best effort: the file stays as it is */
+      }
+    }
     const wasAvailable = this.available;
     this.#healthy = true;
     this.#unhealthySince = null;
@@ -273,6 +333,7 @@ export class EventStore {
       return out;
     } catch (e) {
       this.#counts.clear();
+      this.#keyCounts.clear();
       try {
         this.#d.exec("ROLLBACK");
       } catch {
@@ -449,6 +510,7 @@ export class EventStore {
    * and the agents that got a row (the live stream is told after the commit).
    */
   ingest(t: Table, app: AppRuntime, items: unknown[]): { result: EventIngestResult; agents: Set<string> } {
+    this.#guardSpace();
     const agents = new Set<string>();
     const ins = app.entry.ins;
     const budget = { available: this.#fanoutAvailable(ins), stored: 0 };
@@ -457,6 +519,27 @@ export class EventStore {
     const b = this.#fanout.get(ins);
     if (b) b.tokens -= budget.stored;
     return { result: { results }, agents };
+  }
+
+  /** Disk guards (see EVENT_DB_LIMITS): checked at most every `checkMs`; throws {@link EventStoreFull} while one holds. */
+  #guardSpace(): void {
+    const now = this.now();
+    if (this.#spaceAt === null || now - this.#spaceAt >= EVENT_DB_LIMITS.checkMs || now < this.#spaceAt) {
+      this.#spaceAt = now;
+      const before = this.#spaceVerdict;
+      let verdict: "ok" | "size" | "free_space" = "ok";
+      try {
+        const n = (sql: string, k: string) => (this.#d.prepare(sql).get() as Record<string, number>)[k] ?? 0;
+        const used = (n("PRAGMA page_count", "page_count") - n("PRAGMA freelist_count", "freelist_count")) * n("PRAGMA page_size", "page_size");
+        if (used >= this.#maxBytes) verdict = "size";
+        else if (this.#freeBytes() < this.#minFreeBytes) verdict = "free_space";
+      } catch {
+        verdict = "ok"; // a failing pragma is the store's health business (the transaction below), not a guard hit
+      }
+      this.#spaceVerdict = verdict;
+      if (verdict !== before) this.#log[verdict === "ok" ? "info" : "error"]("bridge.events.disk_guard", { state: verdict });
+    }
+    if (this.#spaceVerdict !== "ok") throw new EventStoreFull(this.#spaceVerdict);
   }
 
   /** Tokens of the per-instance stored-row bucket now (refilled since the last count). */
@@ -605,13 +688,36 @@ export class EventStore {
     return { key, status: "stored", recipients };
   }
 
-  /** (app instance, key) seen in the last 7 days (emit and purge keys alike); records it otherwise. */
+  /**
+   * (app instance, key) seen in the last 7 days (emit and purge keys alike); records it otherwise. At most `keysPerInstance`
+   * keys per app instance are kept: past the cap the oldest by `at` go, down to 90 % of it (review round 3, S3: every accepted
+   * item writes a key, also one with no recipient, so the table needs its own bound).
+   */
   #seen(ins: string, key: string): boolean {
     const now = this.now();
     const row = this.#s("SELECT at FROM keys WHERE ins = ? AND key = ?").get(ins, key) as { at: number } | undefined;
-    if (row && row.at >= now - EVENT_WINDOW_MS) return true;
-    this.#s("INSERT INTO keys (ins, key, at) VALUES (?, ?, ?) ON CONFLICT (ins, key) DO UPDATE SET at = excluded.at").run(ins, key, now);
+    if (row) {
+      if (row.at >= now - EVENT_WINDOW_MS) return true;
+      this.#s("UPDATE keys SET at = ? WHERE ins = ? AND key = ?").run(now, ins, key);
+      return false;
+    }
+    this.#s("INSERT INTO keys (ins, key, at) VALUES (?, ?, ?)").run(ins, key, now);
+    const n = this.#keyCount(ins) + 1;
+    this.#keyCounts.set(ins, n);
+    if (n > this.#keysPerInstance) {
+      const keep = Math.floor(this.#keysPerInstance * 0.9);
+      this.#s("DELETE FROM keys WHERE rowid IN (SELECT rowid FROM keys WHERE ins = ? ORDER BY at, key LIMIT ?)").run(ins, n - keep);
+      this.#keyCounts.set(ins, keep);
+    }
     return false;
+  }
+
+  #keyCount(ins: string): number {
+    const c = this.#keyCounts.get(ins);
+    if (c !== undefined) return c;
+    const n = (this.#s("SELECT count(*) AS n FROM keys WHERE ins = ?").get(ins) as { n: number }).n;
+    this.#keyCounts.set(ins, n);
+    return n;
   }
 
   /** Deletes the stored rows of (agent | every agent, app instance, instanceId), delivered or not. */
@@ -667,6 +773,7 @@ export class EventStore {
         const old = this.#s("SELECT DISTINCT agent FROM rows WHERE ingest_at < ?").all(now - EVENT_RETENTION_MS) as { agent: string }[];
         for (const r of old) this.#retain(r.agent, now);
         this.#s("DELETE FROM keys WHERE at < ?").run(now - EVENT_WINDOW_MS);
+        this.#keyCounts.clear();
       });
     } catch (e) {
       this.#log.warn("bridge.events.sweep_failed", { code: e instanceof Error ? e.message.slice(0, 120) : "error" });
@@ -902,6 +1009,7 @@ function createSchema(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS agents (agent TEXT PRIMARY KEY, dropped_through TEXT, held_dropped INTEGER NOT NULL DEFAULT 0) STRICT;
     CREATE TABLE IF NOT EXISTS keys (ins TEXT NOT NULL, key TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (ins, key)) STRICT;
     CREATE INDEX IF NOT EXISTS keys_at ON keys (at);
+    CREATE INDEX IF NOT EXISTS keys_ins_at ON keys (ins, at);
     CREATE TABLE IF NOT EXISTS manifests (digest TEXT PRIMARY KEY, json TEXT NOT NULL) STRICT;
   `);
   const schema = db.prepare("SELECT v FROM meta WHERE k = 'schema'").get() as { v: string } | undefined;

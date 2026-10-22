@@ -224,7 +224,9 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   // table listener that releases held rows (instance resume, G2b switch) runs first, in the same step as the swap
   // A store that cannot be opened (even after moving a bad file aside) leaves the bridge WITHOUT app events: no `events` cap,
   // ingest 503, methods -32601. Event-log errors never fail a config apply or another table listener.
-  const events = openEventStore({ path: join(dataDir, "bridge", "events.db"), log: logger, digestOf: (m) => o.api.manifestDigest(m), hookMatches: eventHookMatches, onHealth: () => ctx.emit("health") });
+  // TB_EVENTS_MAX_BYTES (optional, positive integer): the size cap of the log (default EVENT_DB_LIMITS.maxBytes, 1 GiB used pages)
+  const maxBytes = Number(env.TB_EVENTS_MAX_BYTES);
+  const events = openEventStore({ path: join(dataDir, "bridge", "events.db"), log: logger, ...(Number.isInteger(maxBytes) && maxBytes > 0 ? { maxBytes } : {}), digestOf: (m) => o.api.manifestDigest(m), hookMatches: eventHookMatches, onHealth: () => ctx.emit("health") });
   ctx.events = events;
   ctx.on("table", (next: Table | undefined) => {
     if (!next || !events) return;

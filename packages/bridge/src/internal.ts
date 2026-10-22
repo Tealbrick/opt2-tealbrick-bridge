@@ -13,7 +13,7 @@ import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
-import { EventIngestLimit, type EventStore } from "./events.ts";
+import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
@@ -402,6 +402,10 @@ export class InternalApi {
     } catch (e) {
       // the per-instance stored-row limit (nothing of the batch was stored; the SDK retries the same keys / halves the batch)
       if (e instanceof EventIngestLimit) return sendError(res, new BridgeError(e.status === 429 ? "rate_limited" : "payload_too_large", e.status, e.message), requestId, e.status === 429 ? { "retry-after": String(e.retryAfterS) } : {});
+      // the disk guards (size cap, nearly full volume): retryable, the store logged the transition
+      if (e instanceof EventStoreFull) return sendError(res, new BridgeError("app_unavailable", 503, "the event log is full; retry later"), requestId, { "retry-after": "60" });
+      // review round 3 (S4): any other failure is logged (code and message only, never the batch), then answered retryably
+      ctx.log.error("bridge.events.ingest_failed", { ins: caller.ins, code: e instanceof Error ? e.message.slice(0, 120) : "error" });
       throw new BridgeError("app_unavailable", 503, "the event log failed; retry");
     }
     const { result, agents } = out;

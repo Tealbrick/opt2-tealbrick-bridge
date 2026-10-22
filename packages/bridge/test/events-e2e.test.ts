@@ -14,6 +14,7 @@ import { after, before, describe, test } from "node:test";
 import { TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
 import { issueAccess, revokeLocal, rotateRefresh } from "../src/identity.ts";
+import type { Logger } from "../src/util.ts";
 import { type Agent, agentSession, ev, eventsManifest, item, listenOn, nOf, op, postEvents } from "./support/events.ts";
 import { AGT, AGT2, CON, INS, makeWorld, type World, waitFor } from "./support/world.ts";
 
@@ -29,7 +30,7 @@ interface EvWorld {
 }
 
 /** A real bridge whose notes app declares events; the app's key (and a service key) listed; AGT2 has a connection, no grant. */
-async function eventsWorld(o: { withHook?: boolean } = {}): Promise<EvWorld> {
+async function eventsWorld(o: { withHook?: boolean; env?: Record<string, string>; logger?: Logger } = {}): Promise<EvWorld> {
   const w = await makeWorld({ real: true, ...o });
   const appKey = await w.api.generateKeyPair();
   const svcKey = await w.api.generateKeyPair();
@@ -539,5 +540,89 @@ describe("review round 1 (bridge#16) S2: event-log failures never take the bridg
     const acks = e.w.acks.length;
     await waitFor(() => e.w.acks.length > acks, 15000);
     assert.ok((e.w.acks.at(-1)?.bridge.caps ?? []).includes("events"));
+  });
+});
+
+describe("review round 3 (bridge#16): ingest failures are logged, the disk guard answers 503, an expired config fails closed", () => {
+  const lines: { event: string; fields: Record<string, unknown> }[] = [];
+  const logger: Logger = {
+    info: (event, fields = {}) => void lines.push({ event, fields }),
+    warn: (event, fields = {}) => void lines.push({ event, fields }),
+    error: (event, fields = {}) => void lines.push({ event, fields }),
+  };
+  let e: EvWorld;
+  before(async () => {
+    e = await eventsWorld({ logger });
+  });
+  after(async () => {
+    await e.w.close();
+  });
+
+  test("S4: a store failure that is not a limit is logged as bridge.events.ingest_failed (code only, no batch content) and answered 503", async () => {
+    const store = e.w.bridge.ctx.events as unknown as { ingest: (...a: unknown[]) => unknown };
+    const real = store.ingest;
+    store.ingest = () => {
+      throw new Error("boom in the store");
+    };
+    try {
+      const r = await postEvents(e.w, e.appKey, [item({ n: 1, summary: "secret summary text" })]);
+      assert.equal(r.status, 503);
+    } finally {
+      store.ingest = real;
+    }
+    const l = lines.find((x) => x.event === "bridge.events.ingest_failed");
+    assert.ok(l, "logged");
+    assert.equal(l.fields.ins, INS);
+    assert.match(String(l.fields.code), /boom in the store/);
+    assert.ok(!JSON.stringify(lines).includes("secret summary text"));
+    okResult(await postEvents(e.w, e.appKey, [item({ n: 2 })]));
+  });
+
+  test("S3: poll, stream and the live flush fail closed on a config older than its exp; list still answers; a fresh config resumes frames", async () => {
+    const a1 = await agentSession(e.w, AGT, CON);
+    const st = await a1.rpc("tealbrick/events/stream", {});
+    assert.ok(st.result);
+    const l = a1.listen();
+    await l.ready;
+    const t = e.w.bridge.ctx.table;
+    assert.ok(t);
+    const exp = t.exp;
+    t.exp = Math.floor(Date.now() / 1000) - 1;
+    try {
+      for (const m of ["tealbrick/events/poll", "tealbrick/events/stream"]) {
+        const r = await a1.rpc(m, {});
+        assert.equal(r.error?.code, -32000, m);
+        assert.equal(r.error?.data?.code, "config_expired", m);
+      }
+      assert.ok((await a1.rpc("tealbrick/events/list")).result, "types only, as tools/list");
+      // an event stored while the config is expired (directly: the wire refuses ingest then) is not framed
+      const app = t.apps.get(INS as never);
+      assert.ok(app);
+      (e.w.bridge.ctx.events as unknown as { ingest: (t: unknown, a: unknown, i: unknown[]) => unknown }).ingest(t, app, [item({ n: 777, summary: "late" })]);
+      e.w.bridge.ctx.emit("events-stored", new Set([AGT]));
+      await sleep(700);
+      assert.equal(l.frames.filter((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 777).length, 0, "no frame while expired");
+    } finally {
+      t.exp = exp;
+    }
+    e.w.bridge.ctx.emit("events-stored", new Set([AGT]));
+    await l.until((x) => x.msg.method === NOTIFY && nOf(x.msg.params.event) === 777, 3000);
+    l.close();
+  });
+});
+
+describe("review round 3 (bridge#16) S3 on the wire: the size cap", () => {
+  test("TB_EVENTS_MAX_BYTES below the used size → ingest 503 app_unavailable with Retry-After; delivery and the cap stay", async () => {
+    const e = await eventsWorld({ env: { TB_EVENTS_MAX_BYTES: "4096" } });
+    try {
+      const r = await postEvents(e.w, e.appKey, [item({ n: 1 })]);
+      assert.equal(r.status, 503, JSON.stringify(r.json));
+      assert.equal(r.json.error?.code ?? r.json.code, "app_unavailable");
+      assert.equal(r.headers.get("retry-after"), "60");
+      const a1 = await agentSession(e.w, AGT, CON);
+      assert.ok((await a1.rpc("tealbrick/events/list")).result, "the methods and the cap are not withdrawn by a guard");
+    } finally {
+      await e.w.close();
+    }
   });
 });

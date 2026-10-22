@@ -4,13 +4,15 @@
  * not need the wire is here; the wire (ingest auth, MCP methods, SSE frames) is in events-e2e.test.ts.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, describe, test } from "node:test";
 import type { AgentEvent } from "@opt2-tealbrick/spec/bridge";
+import { eventHookMatches } from "../src/calls.ts";
 import { bridgeCaps } from "../src/caps.ts";
-import { EVENT_FANOUT_LIMIT, EVENT_RETENTION_ROWS, EventIngestLimit, EventStore, isStorageFailure, ulidAfter } from "../src/events.ts";
+import { EVENT_FANOUT_LIMIT, EVENT_KEYS_PER_INSTANCE, EVENT_RETENTION_ROWS, EventIngestLimit, EventStore, EventStoreFull, type EventStoreOptions, isStorageFailure, ulidAfter } from "../src/events.ts";
 import type { Table } from "../src/table.ts";
 import { silentLogger } from "../src/util.ts";
 import { api, ev, eventsManifest, item, nOf, op, openStore, runtime, table } from "./support/events.ts";
@@ -759,5 +761,140 @@ describe("review round 1 (bridge#16): limits, failures, documented edges", () =>
     assert.ok(!s.list(world({ pausedInstances: [INS_A] }), AGT).types.some((x) => x.app === "notes"));
     assert.ok(!s.list(world({ apps: [{ ...appA, down: true }, appB] }), AGT).types.some((x) => x.app === "notes"));
     assert.ok(s.list(world({ pausedInstances: [INS_A] }), AGT).types.some((x) => x.app === "memo"));
+  });
+});
+
+
+describe("review round 3 (bridge#16): disk guards and the file mode", () => {
+  const open = (o: Partial<EventStoreOptions> = {}, dir = mkdtempSync(join(tmpdir(), "tb-events-r3-"))) => {
+    dirs.push(dir);
+    const path = join(dir, "events.db");
+    const store = new EventStore({ path, log: silentLogger, digestOf: (m) => api.manifestDigest(m), hookMatches: eventHookMatches, ...o });
+    stores.push(store);
+    return { store, path, dir };
+  };
+  const count = (path: string, sql: string) => {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      return (db.prepare(sql).get() as { n: number }).n;
+    } finally {
+      db.close();
+    }
+  };
+  /** an agent exists but has no grant: every emit stores 0 rows (the probe of the round-3 review) */
+  const nobody = () => table({ apps: [appA], agents: [AGT], grants: [] });
+
+  test("S3: the default cap is 100 000 keys per app instance", () => {
+    assert.equal(EVENT_KEYS_PER_INSTANCE, 100_000);
+  });
+
+  test("S3 (the 50 000-item probe, bounded): zero-recipient emits never leave more than the cap of keys; recent keys still dedupe, evicted ones do not", () => {
+    const { store, path } = open({ keysPerInstance: 5_000 });
+    const t = nobody();
+    let last = "";
+    for (let b = 0; b < 500; b++) {
+      const batch = Array.from({ length: 100 }, () => item({ n: 1 }));
+      last = (batch.at(-1) as { key: string }).key;
+      store.ingest(t, appA, batch);
+    }
+    assert.equal(count(path, "SELECT count(*) AS n FROM rows"), 0);
+    const keys = count(path, "SELECT count(*) AS n FROM keys");
+    assert.ok(keys <= 5_000 && keys >= 4_500, `keys ${keys} (cap 5 000, trimmed to 90 %)`);
+    // the newest key is still there: a retry of it is a duplicate; another app instance has its own budget
+    assert.equal(store.ingest(t, appA, [item({ n: 1, key: last })]).result.results[0]?.status, "duplicate");
+    const other = runtime(INS_B, "memo", mB);
+    store.ingest(table({ apps: [appA, other], agents: [AGT], grants: [] }), other, [item({ n: 1 })]);
+    assert.equal(count(path, "SELECT count(*) AS n FROM keys WHERE ins = 'ins_01HRRRRRRRRRRRRRRRRRRRRRRR'"), 1);
+    assert.ok(count(path, "SELECT count(*) AS n FROM keys WHERE ins = 'ins_01HQQQQQQQQQQQQQQQQQQQQQQQ'") <= 5_000);
+  });
+
+  test("S3: purge items count toward the same cap", () => {
+    const { store, path } = open({ keysPerInstance: 200 });
+    const t = nobody();
+    for (let b = 0; b < 10; b++) store.ingest(t, appA, Array.from({ length: 100 }, () => ({ kind: "purge", key: item().key, instanceId: "nb1" })));
+    assert.ok(count(path, "SELECT count(*) AS n FROM keys") <= 200);
+  });
+
+  test("S3: a rolled-back batch leaves a correct key count (no early or missing eviction afterwards)", () => {
+    const { store, path } = open({ keysPerInstance: 50 });
+    const t = nobody();
+    store.ingest(t, appA, Array.from({ length: 40 }, () => item({ n: 1 })));
+    // a batch the fan-out limit refuses whole is rolled back, keys included
+    const crowd = table({ apps: [appA], agents: [AGT], grants: [{ agent: AGT, ins: INS_A }] });
+    const real = store.now;
+    const clock = real();
+    store.now = () => clock;
+    try {
+      for (let i = 0; i < 300; i++) store.ingest(crowd, appA, [item({ n: 1 })]);
+    } finally {
+      store.now = real;
+    }
+    assert.ok(count(path, "SELECT count(*) AS n FROM keys") <= 50);
+    assert.equal(store.ingest(t, appA, [item({ n: 1 })]).result.results[0]?.status, "stored");
+  });
+
+  test("S3: the size cap (used pages) refuses ingest with EventStoreFull; deleting rows brings it back without a restart", () => {
+    const { store } = open({ maxBytes: 256 * 1024 });
+    const clock = { t: Date.now() };
+    store.now = () => clock.t;
+    const t = table({ apps: [appA], agents: [AGT], grants: [{ agent: AGT, ins: INS_A }] });
+    let refused: unknown;
+    for (let i = 0; i < 2_000 && !refused; i++) {
+      try {
+        store.ingest(t, appA, [item({ n: i, summary: "s".repeat(250) })]);
+      } catch (e) {
+        refused = e;
+      }
+      clock.t += 6_000; // past the guard's 5 s check interval
+    }
+    assert.ok(refused instanceof EventStoreFull && refused.reason === "size", String(refused));
+    // purge everything of the instance (freed pages do not count as used), then ingest works again
+    store.purge(INS_A, "none", null);
+    store.exec("DELETE FROM rows");
+    clock.t += 6_000;
+    assert.equal(store.ingest(t, appA, [item({ n: 1 })]).result.results[0]?.status, "stored");
+  });
+
+  test("S3: a volume with less than the minimum free refuses ingest; it resumes when space is back; the check is cached 5 s", () => {
+    let free = 10 * 1024 * 1024;
+    let calls = 0;
+    const { store } = open({ minFreeBytes: 1024 * 1024, freeBytes: () => {
+        calls++;
+        return free;
+      },
+    });
+    const clock = { t: Date.now() };
+    store.now = () => clock.t;
+    const t = table({ apps: [appA], agents: [AGT], grants: [{ agent: AGT, ins: INS_A }] });
+    assert.equal(store.ingest(t, appA, [item({ n: 1 })]).result.results[0]?.status, "stored");
+    free = 100; // below the minimum, but inside the 5 s cache: not seen yet
+    assert.equal(store.ingest(t, appA, [item({ n: 2 })]).result.results[0]?.status, "stored");
+    assert.equal(calls, 1, "one statfs per check interval");
+    clock.t += 6_000;
+    assert.throws(() => store.ingest(t, appA, [item({ n: 3 })]), (e: unknown) => e instanceof EventStoreFull && e.reason === "free_space");
+    assert.throws(() => store.ingest(t, appA, [item({ n: 3 })]), EventStoreFull, "refused (cached verdict)");
+    assert.equal(poll(store, t, AGT).events.length, 2, "delivery is not affected");
+    free = 10 * 1024 * 1024;
+    clock.t += 6_000;
+    assert.equal(store.ingest(t, appA, [item({ n: 4 })]).result.results[0]?.status, "stored");
+  });
+
+  test("S4: events.db, -wal and -shm are created 0600 (event summaries are plain text in them)", () => {
+    const { store, path } = open();
+    const t = table({ apps: [appA], agents: [AGT], grants: [{ agent: AGT, ins: INS_A }] });
+    store.ingest(t, appA, [item({ n: 1, summary: "New message from Alice" })]);
+    for (const suffix of ["", "-wal", "-shm"]) {
+      assert.ok(existsSync(path + suffix), `${suffix || "db"} exists`);
+      assert.equal(statSync(path + suffix).mode & 0o777, 0o600, `events.db${suffix}`);
+    }
+  });
+
+  test("S4: an existing 0644 log is tightened to 0600 at open", () => {
+    const first = open();
+    first.store.close();
+    for (const suffix of ["", "-wal", "-shm"]) if (existsSync(first.path + suffix)) chmodSync(first.path + suffix, 0o644);
+    const again = open({}, first.dir);
+    assert.ok(again.store.healthy);
+    for (const suffix of ["", "-wal", "-shm"]) if (existsSync(again.path + suffix)) assert.equal(statSync(again.path + suffix).mode & 0o777, 0o600, `events.db${suffix}`);
   });
 });

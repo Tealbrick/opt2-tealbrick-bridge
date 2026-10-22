@@ -325,6 +325,7 @@ export class McpServer {
     const t = this.ctx.table;
     const sub = s.events;
     if (!store?.available || !t || !sub || s.streams.size === 0 || this.sessions.get(s.id) !== s) return;
+    if (this.ctx.configExpired()) return; // fail closed like a call; the next config swap schedules a flush again
     if (!this.sessionValid(s)) {
       this.endSession(s.id);
       return;
@@ -596,6 +597,8 @@ export class McpServer {
     const params = isRecord(rpc.params) ? rpc.params : {};
     const paused = t.pausedWorkspace || t.pausedAgents.has(s.agt);
     if (rpc.method === EVENT_MCP_METHODS.list) return store.list(t, s.agt);
+    // review round 3 (S4): like a tool call, delivery fails closed on a config older than its `exp` (C9); nothing is read, dropped or framed
+    if (this.ctx.configExpired()) throw new RpcError(-32000, "config_expired", { code: "config_expired" });
     const cursor = this.eventCursor(params.cursor);
     if (rpc.method === EVENT_MCP_METHODS.poll) return store.poll(t, s.agt, cursor, pollLimit(params.limit), paused);
     const r = store.stream(s.agt, cursor, paused);
