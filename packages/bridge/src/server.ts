@@ -5,7 +5,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
+import { isIP, type Socket } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
@@ -111,16 +111,37 @@ export function ownInfraEnv(env: NodeJS.ProcessEnv, api: ManifestApi): NodeJS.Pr
   return { ...env, TB_KEK: readFileSync(path, "utf8").trim() };
 }
 
+/** A DNS-style host label list: letters, digits, `-` and `_` (Docker service names), dots between labels; 253 characters at most. */
+const INTERNAL_HOST_NAME = /^(?=.{1,253}$)[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*$/;
+
+/**
+ * S1 (M1): `TB_INTERNAL_HOST` set to a NAME (not an IP address) is the stable host this bridge advertises to its
+ * neighbours (`http://<name>:<port>` in the claim answer, so apps hold a `TB_BRIDGE_URL` that survives a container
+ * recreate, where the container id as host name does not). A name never changes what the listener binds. Returns
+ * undefined when unset or when the value is an IP address (that case stays the BRG-29 bind address). An invalid value
+ * is a boot error: a wrong advertised host would silently break every app.
+ */
+export function internalHostName(env: NodeJS.ProcessEnv): string | undefined {
+  const set = env.TB_INTERNAL_HOST?.trim();
+  if (!set || isIP(set) !== 0) return undefined;
+  if (!INTERNAL_HOST_NAME.test(set)) throw new Error("TB_INTERNAL_HOST must be an IP address or a host name (letters, digits, - _ and dots; no scheme, port or path)");
+  return set;
+}
+
 /**
  * BRG-29: the address the internal listener (claim, status, keys, companion calls, metrics) binds. `TB_INTERNAL_HOST`
- * wins. Deployed form (a Railway service on the workspace private network): `::`, the address Node bound implicitly
+ * wins when it is an IP address. Deployed form (a Railway service on the workspace private network): `::`, the address Node bound implicitly
  * before 0.1.27 (dual stack; the private network reaches the service over it), with Node's own fallback to `0.0.0.0`
  * on a host without IPv6. own_infra (`tealbrick bridge run` on a user machine or NAS): `127.0.0.1`, never every
  * interface implicitly; a neighbour on another machine needs `TB_INTERNAL_HOST` set to the private interface.
+ * S1: a `TB_INTERNAL_HOST` that is a NAME only sets the advertised host (see `internalHostName`) and binds like unset;
+ * in the own_infra form that would leave the advertised name unreachable, so it is refused there.
  */
 export function internalListenHost(form: "deployed" | "own_infra", env: NodeJS.ProcessEnv): { host: string; explicit: boolean } {
+  const name = internalHostName(env);
+  if (name && form === "own_infra") throw new Error("TB_INTERNAL_HOST as a host name needs the deployed form (the listener binds every interface there); on own_infra set an IP address");
   const set = env.TB_INTERNAL_HOST?.trim();
-  if (set) return { host: set, explicit: true };
+  if (set && !name) return { host: set, explicit: true };
   return { host: form === "own_infra" ? "127.0.0.1" : "::", explicit: false };
 }
 
@@ -163,7 +184,7 @@ export async function enrolBridge(o: { api: ManifestApi; env: NodeJS.ProcessEnv;
     logger: o.logger ?? jsonLogger(),
     portalUrl: assertOrigin(env.TB_PORTAL_URL ?? "", "TB_PORTAL_URL"),
     publicUrl: assertOrigin(env.TB_PUBLIC_URL ?? "", "TB_PUBLIC_URL"),
-    internalUrl: `http://${hostname()}:${Number(env.TB_INTERNAL_PORT ?? 8788)}`,
+    internalUrl: `http://${internalHostName(env) ?? hostname()}:${Number(env.TB_INTERNAL_PORT ?? 8788)}`,
     form: o.form ?? "own_infra",
     ...(o.portalRootKeys ? { portalRoots: o.portalRootKeys } : {}),
     ...(o.fetch ? { fetch: o.fetch } : {}),
@@ -198,9 +219,9 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const viewsKeyPrevious = viewsKeyPrevRaw && viewsKeyPrevRaw.length >= VIEWS_KEY_MIN_LENGTH ? viewsKeyPrevRaw : undefined;
   if (viewsKeyPrevRaw && !viewsKeyPrevious) logger.warn("bridge.views.key_unusable", { code: "views_key_previous_too_short" });
   const internalBind = internalListenHost(form, env);
-  // the advertised internal address: the Railway private domain, else the bound address when it is one host
+  // the advertised internal address: TB_INTERNAL_HOST when it is a name (S1), else the Railway private domain, else the bound address when it is one host
   const boundHost = WILDCARD_HOSTS.has(internalBind.host) ? undefined : internalBind.host.includes(":") ? `[${internalBind.host}]` : internalBind.host;
-  const privateHost = env.RAILWAY_PRIVATE_DOMAIN || boundHost || hostname();
+  const privateHost = internalHostName(env) ?? (env.RAILWAY_PRIVATE_DOMAIN || boundHost || hostname());
   const ctx = new BridgeContext({
     api: o.api,
     state,

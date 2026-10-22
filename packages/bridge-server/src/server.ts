@@ -8,8 +8,9 @@
  * (the bridge private origin), `TB_VIEWS_KEY`, `PORT`. It refuses to start when TB_ENROL_CODE, TB_KEK or TB_PORTAL_URL is set.
  *
  * Env of the bridge role (BRIDGE §4.1, §3; LA-1: TB_VIEWS_KEY, TB_VIEWS_KEY_PREVIOUS (rotation only) and TB_VIEWS_PUBLIC_URL when the workspace has a views service): TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR,
- * PORT (public listener), TB_INTERNAL_PORT (private listener, default 8788), TB_INTERNAL_HOST (private listener
- * address, default `::` as before: the Railway private network; BRG-29), TB_PUBLIC_HOST (public listener address,
+ * PORT (public listener), TB_INTERNAL_PORT (private listener, default 8788), TB_INTERNAL_HOST (an IP address: private listener
+ * address, default `::` as before, the Railway private network, BRG-29; a host name: the stable host the bridge advertises, S1, not bound),
+ * TB_OWN_INFRA_ORIGINS (own-infrastructure app origins, read at boot: a change needs a restart), TB_PUBLIC_HOST (public listener address,
  * default: no host as before; C171). KEK rotation (BRG-05): set the new key
  * as TB_KEK and the old one as TB_KEK_PREVIOUS for ONE start (every sealed record moves to TB_KEK), then drop it.
  */

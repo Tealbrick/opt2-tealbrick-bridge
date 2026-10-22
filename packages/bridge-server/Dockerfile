@@ -2,7 +2,8 @@
 #   docker build -f packages/bridge-server/Dockerfile .
 # Public image, no secrets baked in. Runtime env: TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL,
 # TB_DATA_DIR (mount a provider volume at /data; no Dockerfile VOLUME, Railway refuses it), PORT, TB_INTERNAL_PORT,
-# optional TB_INTERNAL_HOST (private listener address; default `::`, the Railway private network), optional
+# optional TB_INTERNAL_HOST (an IP address = private listener address, default `::`, the Railway private network; a NAME = the stable
+# host the bridge advertises to its neighbours, not bound), optional TB_OWN_INFRA_ORIGINS (read at boot: a change needs a restart), optional
 # TB_PUBLIC_HOST (public listener address; default: no host, i.e. `::` dual stack as before).
 # TB_ROLE=views starts the SAME image as the workspace views service (tb-views, LA-1): env TB_VIEWS_UPSTREAM, TB_VIEWS_KEY, PORT;
 # no volume, no Portal, no enrolment, no keys; it refuses to start when TB_ENROL_CODE, TB_KEK or TB_PORTAL_URL is set.
