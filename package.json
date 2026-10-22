@@ -15,16 +15,16 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@opt2-tealbrick/conformance": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-conformance-v0.1.27/opt2-tealbrick-conformance-0.1.27.tgz",
-    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.37/opt2-tealbrick-miniapp-sdk-0.1.37.tgz",
+    "@opt2-tealbrick/conformance": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-conformance-v0.1.28/opt2-tealbrick-conformance-0.1.28.tgz",
+    "@opt2-tealbrick/miniapp-sdk": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-miniapp-sdk-v0.1.38/opt2-tealbrick-miniapp-sdk-0.1.38.tgz",
     "@types/node": "24.19.2",
     "fast-check": "4",
     "typescript": "5.9.3"
   },
   "pnpm": {
     "overrides": {
-      "@opt2-tealbrick/relay>@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.29/opt2-tealbrick-manifest-0.1.29.tgz",
-      "@opt2-tealbrick/relay>@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.54/opt2-tealbrick-spec-0.1.54.tgz"
+      "@opt2-tealbrick/relay>@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.30/opt2-tealbrick-manifest-0.1.30.tgz",
+      "@opt2-tealbrick/relay>@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz"
     }
   }
 }

@@ -4,14 +4,17 @@
  * assertions (`TB-Assert`, typ tb-instance-assert+jwt, bound to method, path and body).
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { EVENT_BATCH_MAX } from "@opt2-tealbrick/manifest";
 import { isRefusal, SDK_CURRENT_MAJOR } from "@opt2-tealbrick/relay";
-import type { AppStatus, AppStatusResponse, CallEnvelope, ClaimRequest, ClaimResponse, KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
+import { type AppStatus, type AppStatusResponse, BRIDGE_INTERNAL_PATHS, type CallEnvelope, type ClaimRequest, type ClaimResponse, type KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
+import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
+import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
@@ -25,7 +28,10 @@ interface InstanceCaller {
   svc: string | undefined;
 }
 
-/** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. */
+/** BRIDGE §14.1: an event ingest body is at most 512 KiB. */
+export const EVENT_INGEST_MAX_BYTES = 512 * 1024;
+
+/** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. Event ingest uses the same bucket (§14.1). */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
 
 const pauseSignature = (t: Table): string => `${t.pausedWorkspace}|${[...t.pausedAgents].sort().join(",")}|${[...t.pausedInstances].sort().join(",")}`;
@@ -120,6 +126,10 @@ export class InternalApi {
         // F57a: no new companion call while draining (retryable; nothing ran)
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
         return await this.companionCall(req, res, requestId);
+      }
+      if (req.method === "POST" && url.pathname === BRIDGE_INTERNAL_PATHS.events) {
+        if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
+        return await this.ingestEvents(req, res, requestId);
       }
       if (req.method === "GET" && url.pathname === "/metrics") return this.metrics(res);
       sendJson(res, 404, envelope("not_found", "not found", requestId));
@@ -349,6 +359,58 @@ export class InternalApi {
       const code = e instanceof BridgeError ? e.code : "app_error";
       sendJson(res, e instanceof BridgeError && e.status !== 400 ? e.status : statusFor(code), envelope(code, e instanceof Error ? e.message : code, requestId));
     }
+  }
+
+  // ── §14.1 app events ingest (bridge 0.2.7) ──
+  private async ingestEvents(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
+    const ctx = this.ctx;
+    const store = ctx.events;
+    if (!store?.healthy) throw new BridgeError("app_unavailable", 503, "the event log is not available; retry");
+    const raw = await readBody(req, EVENT_INGEST_MAX_BYTES);
+    const caller = this.assertCaller(req, raw);
+    // only the claimed APP instance emits (its SDK outbox); a companion service sends no events
+    if (caller.svc) throw new BridgeError("no_grant", 403, "a companion service sends no events");
+    // the companion-call bucket of that instance (C85)
+    const wait = this.appInitiated.take(caller.ins);
+    if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many requests from this instance; retry later"), requestId, { "retry-after": String(wait) });
+    if (!ctx.table || ctx.configExpired()) throw new BridgeError("config_expired", 503);
+    if (!ctx.table.apps.has(caller.ins)) throw new BridgeError("app_not_claimed", 503, "this instance is not in the bridge's config yet; retry");
+    const body = parseJson(raw);
+    const items = isRecord(body) && Array.isArray(body.items) ? (body.items as unknown[]) : null;
+    if (!items || items.length < 1 || items.length > EVENT_BATCH_MAX) throw new BridgeError("input_invalid", 400, `EventIngestBody {items: 1..${EVENT_BATCH_MAX}}`);
+    // the declarations need the serving release's manifest and, for a name only the update candidate declares, the
+    // candidate's: a release this bridge does not hold yet is fetched once; still unknown → retryable (nothing decided)
+    let need = store.needs(ctx.table.apps.get(caller.ins) as AppRuntime, items);
+    if (need.missing === "candidate") {
+      const app = ctx.table.apps.get(caller.ins) as AppRuntime;
+      const cand = acceptedDigests(app.entry)[1];
+      try {
+        const m = await fetchManifestFrom(ctx, app.entry);
+        if (cand && ctx.api.manifestDigest(m) === cand) store.remember(cand, m);
+      } catch {
+        /* answered below */
+      }
+      need = ctx.table?.apps.has(caller.ins) ? store.needs(ctx.table.apps.get(caller.ins) as AppRuntime, items) : { missing: "serving" };
+    }
+    if (need.missing) throw new BridgeError("app_unavailable", 503, `the ${need.missing} release's manifest is not loaded yet; retry`);
+    // the CURRENT table (a swap during the fetch above applied its re-ids first; ingest is one synchronous step)
+    const t = ctx.table as Table;
+    const app = t.apps.get(caller.ins) as AppRuntime;
+    let out: ReturnType<EventStore["ingest"]>;
+    try {
+      out = store.ingest(t, app, items);
+    } catch (e) {
+      // the per-instance stored-row limit (nothing of the batch was stored; the SDK retries the same keys / halves the batch)
+      if (e instanceof EventIngestLimit) return sendError(res, new BridgeError(e.status === 429 ? "rate_limited" : "payload_too_large", e.status, e.message), requestId, e.status === 429 ? { "retry-after": String(e.retryAfterS) } : {});
+      // the disk guards (size cap, nearly full volume): retryable, the store logged the transition
+      if (e instanceof EventStoreFull) return sendError(res, new BridgeError("app_unavailable", 503, "the event log is full; retry later"), requestId, { "retry-after": "60" });
+      // review round 3 (S4): any other failure is logged (code and message only, never the batch), then answered retryably
+      ctx.log.error("bridge.events.ingest_failed", { ins: caller.ins, code: e instanceof Error ? e.message.slice(0, 120) : "error" });
+      throw new BridgeError("app_unavailable", 503, "the event log failed; retry");
+    }
+    const { result, agents } = out;
+    sendJson(res, 200, result);
+    if (agents.size) ctx.emit("events-stored", agents);
   }
 
   private metrics(res: ServerResponse): void {

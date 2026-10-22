@@ -9,7 +9,7 @@ import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConf
 import { type ConnectionId, LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
-import { BRIDGE_CAPS_DECLARED } from "./caps.ts";
+import { bridgeCaps } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
@@ -190,7 +190,7 @@ export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown
   });
 }
 
-async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Promise<Manifest> {
+export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Promise<Manifest> {
   const res = await ctx.fetch(new URL("/tb/v1/manifest", app.internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new ManifestError(`fetch_http_${res.status}`);
   const v = ctx.api.validateManifest(await res.json());
@@ -417,7 +417,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     rev: t?.rev ?? 0,
     appliedAt: new Date().toISOString(),
     // spec 0.1.54 (C292): the capabilities this build implements, in EVERY report (caps.ts: only with the code they name)
-    bridge: { id: id.bridgeId, version: BRIDGE_VERSION, form: ctx.form, boot: ctx.boot, sdkMajors: SDK_MAJORS, mcpVersions: MCP_VERSIONS, caps: [...BRIDGE_CAPS_DECLARED] },
+    bridge: { id: id.bridgeId, version: BRIDGE_VERSION, form: ctx.form, boot: ctx.boot, sdkMajors: SDK_MAJORS, mcpVersions: MCP_VERSIONS, caps: bridgeCaps(ctx) },
     portalReachable: ctx.portalReachable(now),
     portalKeysDigest: ctx.api.digest(id.portalKeys as unknown as Json),
     apps,

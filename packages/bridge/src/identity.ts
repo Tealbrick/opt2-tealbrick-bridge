@@ -12,6 +12,9 @@ import { BridgeError, nowS } from "./util.ts";
 export interface AgentPrincipal {
   agt: AgentId;
   con: ConnectionId;
+  /** the K5's connection generation and expiry (epoch s): open event streams are re-checked against them (bridge 0.2.7) */
+  gen: number;
+  exp: number;
 }
 
 /** Current connection state: config entry, else a locally created pairing record not yet listed (BRIDGE §6). */
@@ -75,7 +78,7 @@ export function authenticateAgent(ctx: BridgeContext, authorization: string | un
   if (!agt || !st?.active || st.gen !== c.gen || st.agt !== agt || c.ws !== t.ws) throw new BridgeError("unauthenticated", 401);
   if (!t.agents.has(agt)) throw new BridgeError("unauthenticated", 401);
   ctx.sawConnection(c.con);
-  return { agt, con: c.con };
+  return { agt, con: c.con, gen: c.gen, exp: c.exp };
 }
 
 /** Refresh-token rotation with one 30 s retry grace (CORE I12, BRIDGE §6.2). */
