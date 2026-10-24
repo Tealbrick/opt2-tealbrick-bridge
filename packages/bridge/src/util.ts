@@ -354,6 +354,20 @@ export function headerValue(req: IncomingMessage, name: string): string | undefi
   return Array.isArray(v) ? v[0] : v;
 }
 
+/** The request target as a URL, or null when it does not parse (e.g. `//`); never throws (a throw in a listener stops the process). */
+export function urlOf(target: string | undefined): URL | null {
+  try {
+    return new URL(target ?? "/", "http://x");
+  } catch {
+    return null;
+  }
+}
+
+/** The pathname of the request target, or null when it does not parse. */
+export function pathOf(target: string | undefined): string | null {
+  return urlOf(target)?.pathname ?? null;
+}
+
 export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
     const t = setTimeout(resolve, ms);

@@ -22,7 +22,7 @@ import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startSt
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
 import type { Table } from "./table.ts";
-import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, proxyTrusted, sendError, sendJson, setProxyTrust } from "./util.ts";
+import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, pathOf, proxyTrusted, sendError, sendJson, setProxyTrust } from "./util.ts";
 import { ViewsRoute } from "./views-route.ts";
 import { VIEWS_KEY_MIN_LENGTH, type ViewsLimits } from "./views-shared.ts";
 
@@ -288,7 +288,10 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
 
   const publicHandler = async (req: IncomingMessage, res: ServerResponse) => {
     const requestId = requestIdOf(ctx);
-    const path = new URL(req.url ?? "/", "http://x").pathname;
+    // a target URL cannot parse (e.g. `GET //`) is a 400: parsed here, before the try, a throw would be an unhandled
+    // rejection and stop the process
+    const path = pathOf(req.url);
+    if (path === null) return sendJson(res, 400, envelope("input_invalid", "bad request target", requestId), { connection: "close" });
     res.setHeader("x-content-type-options", "nosniff");
     if (hsts) res.setHeader("strict-transport-security", "max-age=31536000");
     const release = openRequests.acquire(clientIp(req));
