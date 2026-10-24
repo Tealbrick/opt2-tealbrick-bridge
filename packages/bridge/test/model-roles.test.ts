@@ -94,7 +94,7 @@ const LOCAL_CASES: LocalCase[] = (JSON.parse(readFileSync(new URL("./fixtures/lo
 
 describe("BRIDGE §15.3 local check (RM-3, unit; spec follow-up #49)", () => {
   test("every row of the spec fixture local-check.cases.json gives its expected class and canonical form", () => {
-    assert.equal(LOCAL_CASES.length, 106, "all rows of specs#49 3129040");
+    assert.equal(LOCAL_CASES.length, 135, "all rows of specs#49 8db2b9a");
     for (const c of LOCAL_CASES) {
       const label = `${c.kind} ${JSON.stringify(c.input)}`;
       if (c.kind === "own_host") {

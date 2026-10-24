@@ -1,5 +1,5 @@
 {
-  "source": "Copied from Tealbrick/opt2-tealbrick-specs#49 head 3129040, packages/spec/examples/local-check.cases.json (BRIDGE §15.3). Placeholders so scripts/check-literals.ts passes (no tailnet DNS suffix or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100. The test restores them before use; every row is otherwise byte-identical to the spec.",
+  "source": "Copied from Tealbrick/opt2-tealbrick-specs#49 head 8db2b9a, packages/spec/examples/local-check.cases.json (BRIDGE §15.3). Placeholders so scripts/check-literals.ts passes (no tailnet DNS suffix or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100. The test restores them before use; every row is otherwise byte-identical to the spec.",
   "description": "Spec follow-up (QA-SPEC49-1/-2/-6): BRIDGE §15.3 local check. kind base = a binding base URL → expect verified | owner_listed | not_local | refused (input hygiene, parse, scheme or transport); kind own_host = an Own hosts entry → accepted | accepted_warn_public | refused. `canonical` = the stored/served form (url.href) when it differs from the input or matters. `ownInfra` = the machine-managed TB_OWN_INFRA_ORIGINS for that row (BRIDGE §5.7). The bridge, the SDK (modelFetch) and tb-exec test against every row (RM-19).",
   "cases": [
     {
@@ -585,6 +585,151 @@
     {
       "kind": "own_host",
       "input": "https://169.254.170.2",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fe80::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[febf::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fec0::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fe00::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fbff::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fd00::1]",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fe00::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fbff::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.127.255.255",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.128.0.1",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.63.255.255",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://169.254.0.1",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://169.255.0.1",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://0.255.255.255",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://1.0.0.0",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fd12:3456::1]:11434/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fdff:ffff::1]/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fe00::1]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1\u0001x",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1\u001f",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%40evil.example",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%5c@x",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1＠evil.example/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1＼evil",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://10.0.0.1%40evil.example",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%5Cevil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%5cevil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1＠evil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1﹫evil",
       "expect": "refused"
     }
   ]

@@ -32,6 +32,13 @@ export const NEVER_LOCAL: readonly string[] = [
 /** Metadata host names that are never local, even when listed (BRIDGE §15.3 step 3). */
 export const NEVER_LOCAL_HOSTNAMES = ["metadata.google.internal", "metadata.goog", "metadata"] as const;
 
+/** Persona text (C353, QA-SPEC49-23, specs#49 3de8dfd): one rule by Unicode property. Accepted when every character is TAB,
+ *  LF, a PERSONA_MARKERS character (SHY, CGJ, ALM, FVS, MVS, ZWSP, ZWNJ, ZWJ, LRM, RLM, variation selectors), or NOT in
+ *  \p{Cc}, \p{Cf}, \p{Cs}, \p{Default_Ignorable_Code_Point}, U+2028 or U+2029 — and no two variation selectors stand in a
+ *  row. Copied verbatim; it needs a unicode-mode regex (`u` flag: property escapes, `\u{…}`, surrogate pairs). */
+export const PERSONA_PATTERN =
+  "^(?![\\s\\S]*[\\uFE00-\\uFE0F\\u{E0100}-\\u{E01EF}]{2})(?:[\\t\\n]|[\\u00AD\\u034F\\u061C\\u180B-\\u180F\\u200B-\\u200F\\uFE00-\\uFE0F\\u{E0100}-\\u{E01EF}]|(?![\\p{Cc}\\p{Cf}\\p{Cs}\\p{Default_Ignorable_Code_Point}\\u2028\\u2029])[\\s\\S])*$" as const;
+
 /** Why a binding has its data policy (BRIDGE §15.3/§15.5): `verified` = the bridge checked it from the URL;
  *  `owner_attested` = the owner said so (every `zdr`, and `local` through the Own hosts list). */
 export const POLICY_BASES = ["verified", "owner_attested"] as const;

@@ -13,6 +13,7 @@ import { PERSONA_MAX_CHARS } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
+import { PERSONA_PATTERN } from "./spec-followup.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -24,6 +25,19 @@ export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../packa
 export const DRAIN_RETRY_AFTER_S = 2;
 /** spec 0.1.63 (bridge.ts `rejected` doc, BRIDGE §15.6): kind `config` + this code = a persona over PERSONA_MAX_CHARS, dropped */
 export const PERSONA_TOO_LONG = "persona_too_long";
+/** spec follow-up #49 (QA-SPEC49-14): kind `config` + this code = a persona that does not match PERSONA_PATTERN, dropped */
+export const PERSONA_INVALID = "persona_invalid";
+/** unicode mode: a surrogate PAIR (an emoji) is one code point and never matches the lone-surrogate range */
+const PERSONA_RE = new RegExp(PERSONA_PATTERN, "u");
+
+/**
+ * BRIDGE §15.6: why a config persona is dropped for its agent (never cut), or undefined when it is delivered. Core refuses
+ * both cases already; this is defence in depth.
+ */
+export function personaProblem(persona: string): typeof PERSONA_TOO_LONG | typeof PERSONA_INVALID | undefined {
+  if (persona.length > PERSONA_MAX_CHARS) return PERSONA_TOO_LONG;
+  return PERSONA_RE.test(persona) ? undefined : PERSONA_INVALID;
+}
 
 /**
  * BSD-08 (CREDENTIALS §9.5): the root channel this build pins. A build constant, never env (Portal sets env at
@@ -192,9 +206,11 @@ export class BridgeContext extends EventEmitter {
     this.table = next;
     // C268c: a config change of an app's digest, version or update candidate drops its hook proof capabilities, before any call uses the new table
     this.proofCaps.onTable(next, prev);
-    // v0.1.63 (BRIDGE §15.6): a persona over PERSONA_MAX_CHARS is dropped for that agent (mcp.ts) and counted once per table
+    // BRIDGE §15.6: a persona over PERSONA_MAX_CHARS or outside PERSONA_PATTERN is dropped for that agent (mcp.ts) and
+    // counted once per table (the detail names the agent and the length, never the text)
     for (const a of next.agents.values()) {
-      if (typeof a.persona === "string" && a.persona.length > PERSONA_MAX_CHARS) this.reject({ kind: "config", code: PERSONA_TOO_LONG, detail: `agent ${a.agt}: ${a.persona.length} > ${PERSONA_MAX_CHARS}` });
+      const problem = typeof a.persona === "string" ? personaProblem(a.persona) : undefined;
+      if (problem) this.reject({ kind: "config", code: problem, detail: `agent ${a.agt}: ${(a.persona as string).length} units` });
     }
     this.emit("table", next, prev);
   }

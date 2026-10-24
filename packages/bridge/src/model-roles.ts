@@ -30,8 +30,9 @@ export function roleRequirements(t: Table | undefined): ModelRoleRequirementEntr
 
 // ── §15.3 local check (spec follow-up #49, QA-SPEC49-1/-2): one algorithm for base URLs and Own hosts, text only ──
 
-/** step 0, input hygiene: `\`, `@`, whitespace, `?` and `#` are refused (parser differentials) … */
-const UNSAFE_INPUT = /[\\@\s?#]/;
+/** step 0, input hygiene: `\`, `@`, their look-alikes (U+FF20, U+FE6B, U+FF3C) and percent forms (`%40`, `%5C`, any case),
+ *  whitespace, `?` and `#` are refused anywhere (parser differentials) … */
+const UNSAFE_INPUT = /[\\@\s?#\uff20\ufe6b\uff3c]|%40|%5c/i;
 /** … and control characters U+0000–U+001F and U+007F (NUL and DEL included) anywhere */
 const hasControl = (s: string) => [...s].some((ch) => (ch.codePointAt(0) as number) < 0x20 || ch.codePointAt(0) === 0x7f);
 
