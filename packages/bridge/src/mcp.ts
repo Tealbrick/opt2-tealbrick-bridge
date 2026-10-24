@@ -646,7 +646,18 @@ export class McpServer {
       }
       // spec 0.1.66 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
       // call then IS that op's direct call (input = `arguments`; key, gate, hooks, proof, holds and receipts name the op)
-      const target = route.kind === "more_call" ? resolveMoreCall(idx, route.app, args) : { route, args };
+      let target: { route: ToolRoute; args: Json } = { route, args };
+      if (route.kind === "more_call") {
+        // QA-BRIDGE20-3: the inner name gets the direct call's refresh-on-miss (C283 A1: an owner may have just admitted it)
+        let more: ToolRoute = route;
+        const inner = moreCallName(route.app, args);
+        if (!idx.routes.has(inner) && (await this.refreshOnMiss(t, p.agt, inner))) {
+          idx = await this.index(this.ctx.table ?? t, p.agt);
+          const again = idx.routes.get(name);
+          if (again?.kind === "more_call") more = again;
+        }
+        target = resolveMoreCall(idx, more.app, args);
+      }
       return await this.runRoute(t, p, target.route, target.args, idem as string | undefined, requestId, signal, sessionId, obo ? { "tb.onBehalfOf": obo as JsonValue } : undefined);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
@@ -726,13 +737,16 @@ export class McpServer {
  * route of the SAME app in this agent's index qualifies; anything else (unknown, not visible to this agent, another product,
  * a standard op, a dynamic op or entry, a `tb_*` tool) is `unknown_tool`, the answer for a name that does not exist.
  */
-export function resolveMoreCall(idx: ToolIndex, app: ToolRoute["app"], args: Json): { route: ToolRoute & { kind: "op" }; args: Json } {
+/** the tool name a `tb_more_call` input names (`<product>__<op>` or the bare op id of this app) */
+export function moreCallName(app: ToolRoute["app"], args: Json): string {
   const tool = isRecord(args) && typeof args.tool === "string" ? args.tool : "";
   if (!tool) throw new BridgeError("input_invalid", 400, "tool required");
   if (isRecord(args) && args.arguments !== undefined && !isRecord(args.arguments)) throw new BridgeError("input_invalid", 400, "arguments must be an object");
-  const product = app.entry.product;
-  const name = tool.includes(TOOL_NAME_RULE.separator) ? tool : `${product}${TOOL_NAME_RULE.separator}${tool}`;
-  const route = idx.routes.get(name);
+  return tool.includes(TOOL_NAME_RULE.separator) ? tool : `${app.entry.product}${TOOL_NAME_RULE.separator}${tool}`;
+}
+
+export function resolveMoreCall(idx: ToolIndex, app: ToolRoute["app"], args: Json): { route: ToolRoute & { kind: "op" }; args: Json } {
+  const route = idx.routes.get(moreCallName(app, args));
   if (route?.kind !== "op" || route.app !== app || route.op.standard || route.op.dynamic) throw new BridgeError("unknown_tool", 404);
   return { route, args: (isRecord(args) && isRecord(args.arguments) ? args.arguments : {}) as Json };
 }

@@ -55,7 +55,7 @@ const NAME_RE = new RegExp(TOOL_NAME_RULE.pattern);
 const RULE_066 = TOOL_NAME_RULE as typeof TOOL_NAME_RULE & { moreSearchOp?: string; moreCallOp?: string };
 export const MORE_SEARCH_OP: string = RULE_066.moreSearchOp ?? "tb_more_search";
 export const MORE_CALL_OP: string = RULE_066.moreCallOp ?? "tb_more_call";
-/** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.66, M-OP-12; tolerated here: listed) */
+/** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.66, M-OP-13; tolerated here: listed) */
 export const isLazyOp = (op: OperationView): boolean => !op.standard && !op.dynamic && (op.listing as string | undefined) === "lazy";
 const MORE_HINT_IDS = 5;
 const SEARCH_SCHEMA: JsonSchemaObject = {
@@ -81,7 +81,7 @@ function annotations(effect: string): ToolDef["annotations"] {
   };
 }
 
-/** §7.5: annotations of `tb_more_call` = the widest of the product's lazy ops */
+/** §7.5: annotations of `tb_more_call` = the widest over the static ops this agent reaches through it (lazy and listed) */
 function widest(effects: readonly string[]): ToolDef["annotations"] {
   return {
     readOnlyHint: effects.every((e) => e === "read"),
@@ -170,6 +170,8 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
     const ops = visibleOps(ctx, app, g.claims, ctx.admittedOps.get(`${agt}|${ins}`));
     let any = false;
     const lazy: ToolDef[] = [];
+    /** §7.5 (QA-BRIDGE20-1): every static op this agent reaches through tb_more_call (lazy AND listed) */
+    const reach: ToolDef[] = [];
     for (const op of ops) {
       if (op.standard) continue;
       if (op.dynamic?.mode === "list") {
@@ -190,6 +192,12 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         }
         const ceiling = EFFECTS.indexOf(op.dynamic.effectCeiling);
         for (const e of catalog) {
+          // spec 0.1.66 (QA-BRIDGE20-2): `tb_` is reserved (MANIFEST §5.4); an entry named tb_* would shadow tb_hold_status,
+          // tb_skills or the §7.5 pair
+          if (e.name.startsWith("tb_")) {
+            ctx.toolsOmitted.set(`${app.entry.ins}|${e.name}`, { ins: app.entry.ins, name: e.name, code: "name_collision" });
+            continue;
+          }
           // C283 A1: an entry the SDK marked `admitted: "owner"` for this agent is listed above grant.crud (display only) when the
           // dynamic op has a scopeType (the SDK marks only those; as the static branch, never trust the mark otherwise); the op's
           // own ceilings still hold, and the SDK authorizes the call
@@ -210,8 +218,11 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
       }
       const def: ToolDef = { name: `${product}__${op.id}`, title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, annotations: annotations(op.effect), op: op.id, effect: op.effect };
       if (isLazyOp(op)) {
-        if (add(app, def, { kind: "op", app, op }, false)) lazy.push(def);
-      } else add(app, def, { kind: "op", app, op });
+        if (add(app, def, { kind: "op", app, op }, false)) {
+          lazy.push(def);
+          reach.push(def);
+        }
+      } else if (add(app, def, { kind: "op", app, op })) reach.push(def);
       any = true;
     }
     if (!any) continue;
@@ -219,7 +230,9 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
       // §7.5: one pair per product; the search is answered from this list, the call resolves to the op's own route
       const name = app.manifest?.name ?? product;
       const ids = lazy.slice(0, MORE_HINT_IDS).map((d) => d.op).join(", ");
-      const effects = lazy.map((d) => d.effect ?? "read");
+      // QA-BRIDGE20-1: the widest over every op tb_more_call reaches for THIS agent, never only the lazy ones (a listed
+      // destructive op is callable through it too) and never the whole manifest (that would show ops outside the grant)
+      const effects = reach.map((d) => d.effect ?? "read");
       add(app, { name: `${product}__${MORE_SEARCH_OP}`, title: `${name}: more tools`, description: `Find more ${name} tools: ${lazy.length} not listed here (e.g. ${ids}${lazy.length > MORE_HINT_IDS ? ", …" : ""}). Input: words to look for, or "*" for all. Returns each tool's name, description and input schema; call one with ${product}__${MORE_CALL_OP}.`, inputSchema: SEARCH_SCHEMA, annotations: { readOnlyHint: true } }, { kind: "more_search", app, lazy });
       add(app, { name: `${product}__${MORE_CALL_OP}`, title: `${name}: call a tool`, description: `Call one ${name} tool found with ${product}__${MORE_SEARCH_OP}. Input: {"tool": "<name from the search>", "arguments": {…}}. Same checks, approvals and receipts as a direct call.`, inputSchema: CALL_SCHEMA, annotations: widest(effects) }, { kind: "more_call", app });
     }

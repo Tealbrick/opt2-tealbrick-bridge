@@ -5,7 +5,7 @@
  *
  * The pinned validator (manifest 0.1.30, spec 0.1.57) refuses `listing: "lazy"` (`schema_invalid`), so the end-to-end tests
  * run in the test-double world; the real-crypto world runs them as soon as the pinned validator accepts the value (pin bump
- * to spec >= 0.1.66), and says so while it does not. Mirrors conformance B29.*.
+ * to spec >= 0.1.66), and says so while it does not. Mirrors conformance B30.*.
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -74,7 +74,7 @@ for (const real of [false, true]) {
       await w.close();
     });
 
-    test("B29.lazy_hidden: tools/list has the hot op and the pair, not the lazy ops; the pair's annotations are the widest lazy effect", async () => {
+    test("B30.lazy_hidden: tools/list has the hot op and the pair, not the lazy ops; tb_more_call's annotations are the widest over the ops it reaches", async () => {
       const tools = await list(w, await session(w));
       const names = tools.map((t) => t.name);
       assert.ok(names.includes("notes__notes_list"), "hot op listed");
@@ -90,7 +90,7 @@ for (const real of [false, true]) {
       for (const t of tools) assert.ok(!("op" in t) && !("effect" in t), "no internal fields in tools/list");
     });
 
-    test("B29.lazy_search: '*' returns the visible lazy ops with schema and effect; a word ranks its op first; the app gets no call", async () => {
+    test("B30.lazy_search: '*' returns the visible lazy ops with schema and effect; a word ranks its op first; the app gets no call", async () => {
       const s = await session(w);
       const ops = w.appLog.ops.length;
       const seen = w.bridgeOps.seen.length;
@@ -115,7 +115,7 @@ for (const real of [false, true]) {
       assert.equal(w.bridgeOps.seen.length, seen, "nor a bridge op");
     });
 
-    test("B29.lazy_grant: a lazy op the grant does not make visible is not callable (via the pair or by name); the app sees nothing", async () => {
+    test("B30.lazy_grant: a lazy op the grant does not make visible is not callable (via the pair or by name); the app sees nothing", async () => {
       const s = await session(w);
       const ops = w.appLog.ops.length;
       for (const [name, args] of [[CALL, { tool: "notes__notes_delete", arguments: {} }], [CALL, { tool: "notes_delete", arguments: {} }], ["notes__notes_delete", {}]] as const) {
@@ -126,7 +126,7 @@ for (const real of [false, true]) {
       assert.equal(w.appLog.ops.length, ops);
     });
 
-    test("B29.lazy_call_same_route: through tb_more_call = the direct call (proof op + input digest, hooks name the op, same derived key, held handle)", async () => {
+    test("B30.lazy_call_same_route: through tb_more_call = the direct call (proof op + input digest, hooks name the op, same derived key, held handle)", async () => {
       const s = await session(w);
       const start = w.appLog.ops.length;
       const hooks = w.appLog.hooks.length;
@@ -161,7 +161,7 @@ for (const real of [false, true]) {
       assert.equal((await call(w, s, CALL, { tool: "notes_create", arguments: "x" })).structuredContent?.error?.code, "input_invalid");
     });
 
-    test("B29.lazy_unknown: unknown op, another product, a standard op, the pair itself → unknown_tool", async () => {
+    test("B30.lazy_unknown: unknown op, another product, a standard op, the pair itself → unknown_tool", async () => {
       const s = await session(w);
       const ops = w.appLog.ops.length;
       for (const tool of ["notes__nope", "nope", "guard__guard_status", "notes__tb_hold_status", "tb_hold_status", SEARCH, CALL, "notes__tb_skills"]) {
@@ -171,7 +171,7 @@ for (const real of [false, true]) {
       assert.equal(w.appLog.ops.length, ops);
     });
 
-    test("B29.lazy_hot_and_direct: a listed op via tb_more_call is allowed; a lazy op by its own name is allowed", async () => {
+    test("B30.lazy_hot_and_direct: a listed op via tb_more_call is allowed; a lazy op by its own name is allowed", async () => {
       const s = await session(w);
       const hot = await call(w, s, CALL, { tool: "notes__notes_list", arguments: { q: "z" } });
       assert.equal(hot.isError, undefined);
@@ -209,6 +209,85 @@ for (const real of [false, true]) {
     });
   });
 }
+
+// QA-BRIDGE20-1/-2/-3 (spec 0.1.66 review): annotations over every op tb_more_call reaches, tb_* catalog entries, refresh-on-miss
+const { input: _dIn, output: _dOut, ...engineBase } = archive;
+const qaManifest = {
+  ...notesManifest,
+  version: "1.4.0",
+  operations: [
+    ...(notesManifest.operations as { id: string }[]).filter((o) => ["notes_list", "notes_delete", "notes_admin"].includes(o.id)),
+    archive,
+    // scoped and above the grant: visible only once the owner's row admits it (C283 A1)
+    { ...archive, id: "notes_s_lazy", title: "Rename a notebook", crud: ["update"], effect: "write", receipt: true, scopeType: "notebook" },
+    { ...engineBase, id: "notes_engine", title: "Engine", listing: undefined, idempotency: "supported", dynamic: { mode: "list", crudCeiling: ["read"], effectCeiling: "read" } },
+  ],
+};
+const entry = (name: string) => ({ name, title: name, description: `Entry ${name}`, inputSchema: { type: "object" }, crud: ["read"], effect: "read" });
+
+describe("lazy tools: QA fixes (test double)", () => {
+  let w: World;
+  let admitted: string[] = [];
+  before(async () => {
+    w = await makeWorld({ real: false });
+    w.bridgeOps.answer = (path) => {
+      if (path === "catalog") return [entry("tb_more_call"), entry("tb_skills"), entry("ok_entry")];
+      if (path === "scope-summary") return [{ agent: AGT, label: "1 Notebook", admittedOps: admitted }];
+      return undefined;
+    };
+    w.updateAppTo(qaManifest);
+    // probe A1: the agent may delete, the only lazy op it sees is a read
+    const g = await w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 3600, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: ["read", "create", "delete"], mode: "free", held: [], caps: {}, wf: [], polrev: 1 });
+    await w.publish((c) => {
+      c.grants = [g];
+    });
+    await waitFor(() => !!w.bridge.ctx.table?.apps.get(INS as never)?.ops.has("notes_s_lazy") && w.bridge.ctx.table?.rev === w.rev(), 15000);
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("QA-BRIDGE20-1: tb_more_call annotations are the widest over the lazy AND listed ops this agent reaches (a listed destructive op counts)", async () => {
+    const s = await session(w);
+    const tools = await list(w, s);
+    assert.ok(tools.some((t) => t.name === "notes__notes_delete"), "notes_delete is listed (hot)");
+    const c = tools.find((t) => t.name === CALL);
+    assert.deepEqual(c?.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    assert.equal(tools.find((t) => t.name === SEARCH)?.annotations?.readOnlyHint, true);
+    // and it does reach the listed destructive op
+    const r = await call(w, s, CALL, { tool: "notes_delete", arguments: {} });
+    assert.equal(r.isError, undefined, JSON.stringify(r));
+    assert.equal(w.appLog.ops.at(-1)?.op, "notes_delete");
+  });
+
+  test("QA-BRIDGE20-2: catalog entries named tb_* are omitted (name_collision); the real pair stays", async () => {
+    const s = await session(w);
+    const names = (await list(w, s)).map((t) => t.name);
+    assert.ok(names.includes("notes__ok_entry"), "an ordinary entry is listed");
+    assert.equal(names.filter((n) => n === CALL).length, 1);
+    assert.equal(names.filter((n) => n === "notes__tb_skills").length, 1);
+    for (const n of ["tb_more_call", "tb_skills"]) assert.equal(w.bridge.ctx.toolsOmitted.get(`${INS}|${n}`)?.code, "name_collision", n);
+    const r = await call(w, s, CALL, { tool: "notes_archive", arguments: {} });
+    assert.equal(r.isError, undefined);
+    assert.equal(w.appLog.ops.at(-1)?.op, "notes_archive", "tb_more_call is the bridge's pair, not the app's entry");
+  });
+
+  test("QA-BRIDGE20-3: after the owner admits a scoped lazy op, tb_more_call finds it through refresh-on-miss (as a direct call does)", async () => {
+    const s = await session(w);
+    assert.equal((await call(w, s, SEARCH, { query: "*" })).structuredContent?.total, 1, "only notes_archive before");
+    admitted = ["notes_s_lazy"];
+    w.bridge.ctx.scopeSummaryAt.set(INS as never, 0);
+    const seen = w.bridgeOps.seen.filter((x) => x.path === "scope-summary").length;
+    const r = await call(w, s, CALL, { tool: "notes_s_lazy", arguments: {} });
+    assert.equal(r.isError, undefined, JSON.stringify(r));
+    assert.equal(w.appLog.ops.at(-1)?.op, "notes_s_lazy");
+    assert.equal(w.bridgeOps.seen.filter((x) => x.path === "scope-summary").length, seen + 1, "one scope-summary request");
+    // an unknown inner name of a scoped-op-free kind asks nothing
+    w.bridge.ctx.scopeSummaryAt.set(INS as never, 0);
+    assert.equal((await call(w, s, CALL, { tool: "nope", arguments: {} })).structuredContent?.error?.code, "unknown_tool");
+    assert.equal(w.bridgeOps.seen.filter((x) => x.path === "scope-summary").length, seen + 1);
+  });
+});
 
 test("searchLazy: words, ranking, '*' and limit (BRIDGE §7.5)", () => {
   const d = (op: string, description: string): ToolDef => ({ name: `p__${op}`, op, title: op, description, inputSchema: { type: "object" }, effect: "read" });
