@@ -2,7 +2,7 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
-## Unreleased — scope sources in the status report (C331 D8; spec 0.1.65 shape, local types until the pin)
+## Unreleased — scope sources in the status report (C331 D8; spec 0.1.65)
 
 - `scope_summary` answers may carry `sources` (the agent's scope instances: type, the app's instance id, label, access). The bridge keeps the first 20 well-formed items (snake type and access, id `[A-Za-z0-9_-]{1,64}`), strips `\p{Cc}`/`\p{Cf}` from labels and clamps them to 60, drops malformed items, and forwards them in `StatusReport.scopeSummaries[].sources`. An answer without `sources` (SDK before 0.1.65) forwards none. A change of sources alone pokes Portal like a label change. Display only.
 

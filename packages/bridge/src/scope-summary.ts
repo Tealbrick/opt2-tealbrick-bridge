@@ -10,6 +10,7 @@
  *    {@link LIST_MAX_AGE_MS}, and a tools/call of a scoped op that the tool list does not show ({@link MISS_MIN_AGE_MS}).
  *    An owner who widens a row then sees the tool without waiting for the app's next push. One request per app at a time.
  */
+import { SCOPE_SOURCE_LABEL_MAX, SCOPE_SOURCES_MAX, type ScopeSourceItem } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { CallRouter } from "./calls.ts";
 import type { BridgeContext } from "./context.ts";
@@ -22,13 +23,6 @@ export const LIST_MAX_AGE_MS = 30_000;
 /** a tools/call of an unlisted scoped op asks again when the last answer is older than this (bounds the load an agent can cause) */
 export const MISS_MIN_AGE_MS = 5_000;
 
-/**
- * Spec 0.1.65 (C331 D8), declared here until the bridge pins that spec (then `ScopeSourceItem`, `SCOPE_SOURCES_MAX` and
- * `SCOPE_SOURCE_LABEL_MAX` come from @opt2-tealbrick/spec/bridge): one scope instance an agent may use, for the canvas.
- */
-export interface ScopeSourceItem { type: string; id: string; label: string; access: string }
-export const SCOPE_SOURCES_MAX = 20;
-export const SCOPE_SOURCE_LABEL_MAX = 60;
 const SNAKE_RE = /^[a-z][a-z0-9_]{0,39}$/;
 const SOURCE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -46,7 +40,7 @@ export function scopeSourceItems(v: unknown): ScopeSourceItem[] | undefined {
     if (typeof type !== "string" || !SNAKE_RE.test(type) || typeof access !== "string" || !SNAKE_RE.test(access)) continue;
     if (typeof id !== "string" || !SOURCE_ID_RE.test(id) || typeof label !== "string") continue;
     const clean = label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, SCOPE_SOURCE_LABEL_MAX);
-    if (clean) out.push({ type, id, label: clean, access });
+    if (clean) out.push({ type: type as ScopeSourceItem["type"], id, label: clean, access: access as ScopeSourceItem["access"] });
   }
   return out;
 }
