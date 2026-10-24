@@ -2,12 +2,14 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
-## 0.2.8 — hook target tool, secretOutput ops (C336 RQ-2, RQ-3; spec 0.1.66)
+## 0.2.8 — hook target tool, secretOutput ops; caps `hook_tool`, `secret_output` (C336 RQ-2, RQ-3; spec 0.1.68, specs#47)
 
-- **Hook target `tool` (BRIDGE §8.2 v0.1.66, RQ-2).** For a dynamic call (a listed dynamic entry, `<op>_call`, or a companion/relay call of a dynamic op) every hook request (before, context, after) carries `call.target.tool` = the catalog entry name; `crud`, `effect` and `holdFamily` are that entry's resolution (as before). Absent for static ops; dynamic search never routes a call.
-- **`secretOutput` ops (MANIFEST M-OP-11, RQ-3).** For an op with `secretOutput: true` the bridge calls no `after` hook, forwards no idempotency key to the app (the app keeps no row; M-OP-11 requires `idempotency: "none"`, so the bridge derives none either), and returns the result to the caller only. The call log line keeps ids, codes and the input digest only, as for every call.
-- The new fields are read structurally (`// spec 0.1.66`): the pins stay spec 0.1.57 / manifest 0.1.30 until spec 0.1.66 and manifest 0.1.31 are released. Until the manifest re-pin, the bridge's validator (manifest 0.1.30) refuses a manifest that declares `secretOutput` (fail closed); `requiredBridgeVersion` in manifest 0.1.31 names bridge 0.2.8 for such a manifest.
-- Test: `packages/bridge/test/c336-hook-tool-secret.test.ts` (positive control: the same op without the flag runs the after hook and forwards the key).
+- **Hook target `tool` (BRIDGE §8.2 v0.1.68, cap `hook_tool`).** On all three dynamic call paths (a listed dynamic entry and `<op>_call` over MCP, the relay's dynamic call, a companion call of a dynamic op on the internal listener; all through `CallRouter.route`) every hook request (before, context, after) carries `call.target.tool` = `DynamicResolution.tool`, the app's canonical resolution, with `crud` / `effect` / `holdFamily` from that resolution. Absent for static ops; dynamic search never routes a call. A resolution whose `tool` differs from the requested name or does not match `^[a-z][a-z0-9_]{1,47}$` is refused 403 `dynamic_resolve_failed` (`details.reason: "tool_mismatch"`, not cached) before any hook runs: a case, space or alias variant is never mapped onto a held tool.
+- **`secretOutput` ops (MANIFEST M-OP-12, cap `secret_output`).** The op is never listed for agents (`visibleOps`), an agent call is refused 403 `secret_output_app_only` before anything runs, and for an app caller the bridge calls no `after` hook, forwards no idempotency key (the app keeps no row) and returns the result to the calling app only. Logs and status fields carry ids, codes and digests only, as for every call.
+- **Caps.** `StatusReport.bridge.caps` (and re-minted standalone slices) add `hook_tool` and `secret_output`, each with a probe in `caps.test.ts`.
+- **Compatibility.** A dynamic engine whose tool names are not canonical (upper case, `-`, longer than 48 characters) or whose `resolve` answers a different spelling is refused from this version on.
+- The spec 0.1.68 fields are read structurally (`// spec 0.1.68`): pins stay spec 0.1.57 / manifest 0.1.30 until spec 0.1.68 and manifest 0.1.31 are released. Until the manifest re-pin, this bridge's validator refuses a manifest that declares `secretOutput` (fail closed). Manifest 0.1.31 `requiredBridgeVersion` names bridge 0.2.8 for such a manifest.
+- Tests: `packages/bridge/test/c336-hook-tool-secret.test.ts` (B29.hook_target_tool_list / _call / _relay, B29.hook_tool_bypass, C-SO-1/2 bridge part, with positive controls) and the cap probes.
 
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
