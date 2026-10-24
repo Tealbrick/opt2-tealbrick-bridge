@@ -17,15 +17,19 @@
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  *    Reported only while the event log is available ({@link bridgeCaps}).
+ *  - `model_roles` = ALL of BRIDGE §15 (spec 0.1.63, bridge 0.2.8): S11 bindings beside the key store (state.ts), the "Keys
+ *    and models" page (models-page.ts), `GET /tb/v1/model-roles/<role>` (internal.ts, model-roles.ts `resolveForCaller`),
+ *    `StatusReport.roles` (model-roles.ts `roleStatuses`) and the persona in instructions + `tb://agent/persona` (mcp.ts).
+ *    Core sends `agents[].persona` and `modelRoleRequirements[]` only to a bridge that declares it.
  */
-import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
+import type { BridgeCap0163 } from "./spec-0163.ts";
 
-export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows", "events"];
+export const BRIDGE_CAPS_DECLARED: readonly BridgeCap0163[] = ["owner_rows", "events", "model_roles"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
  * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap0163[] {
   return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
 }

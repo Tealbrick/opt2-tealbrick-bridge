@@ -1,6 +1,7 @@
 /**
  * Persistent bridge state on ONE volume (BRIDGE §1.2): S1 identity, S2 last good config, S3 sealed key
- * store, S4 pairing connections, S5 pending claims, S6 used one-time jtis, S9 standalone overlay.
+ * store, S4 pairing connections, S5 pending claims, S6 used one-time jtis, S9 standalone overlay, S11 model-role
+ * bindings (v0.1.63, BRIDGE §15.1; one `keysRev` with S3).
  *
  * Integrity (C62 BSD-03): every record except S2 is sealed with TB_KEK (AES-256-GCM, AAD = purpose + file),
  * so a planted or edited file is refused instead of trusted; S2 is a Portal-signed JWS and is verified on
@@ -15,8 +16,9 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { join } from "node:path";
 import type { Kek, ManifestApi } from "@opt2-tealbrick/relay";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
-import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, InstanceId, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
 import type { Ed25519KeyPair, PinnedKeySet } from "@opt2-tealbrick/spec/sdk";
+import type { DataPolicy, ModelRole } from "./spec-0163.ts";
 
 const isPinned = (v: unknown): v is PinnedKeySet =>
   !!v && typeof v === "object" && Number.isInteger((v as PinnedKeySet).seq) && typeof (v as PinnedKeySet).kss === "string";
@@ -63,6 +65,37 @@ export interface StandaloneOverlay {
 export interface KeyStore {
   keysRev: number;
   values: Record<string, string>;
+  /**
+   * v0.1.63 (BRIDGE §15.1): which names in `values` are owner-named provider keys (label ≤ 60, e.g. "OpenAI main"); the
+   * other names are requirement names. Absent on volumes of older bridges = none.
+   */
+  providerKeys?: string[];
+}
+
+/** S11 (BRIDGE §15.1): one model-role binding. `ins` absent = workspace default; set = override for that app instance. */
+export interface ModelBinding {
+  role: ModelRole;
+  ins?: InstanceId;
+  /** MODEL_PROVIDERS id */
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  /** a name in S3 (`KeyStore.values`); absent for a provider with `keyNeeded: false` or when the key was deleted */
+  keyName?: string;
+  dataPolicy: DataPolicy;
+  /** ISO time of the owner's zero-data-retention tick (`zdr` only) */
+  zdrAttestedAt?: string;
+  /** embeddings only */
+  dims?: number;
+}
+
+/**
+ * The S11 record. `rev` = the `keysRev` this write belongs to: the record is written before the key store, so a crash
+ * between the two writes is repaired at boot (keysRev = max of both) and apps still see the change.
+ */
+interface ModelsRecord {
+  rev: number;
+  bindings: ModelBinding[];
 }
 
 /** Facts the status report must carry until Portal confirmed them (BSD-11): survive restarts. */
@@ -73,7 +106,7 @@ export interface PendingReports {
 }
 
 /** Every sealed record on the volume (`<name>.sealed.json`). S2 (config.jws) is a signed JWS, not sealed. */
-const RECORDS = ["identity", "connections", "claims", "jtis", "keys", "standalone", "reports", "enrol-refused"] as const;
+const RECORDS = ["identity", "connections", "claims", "jtis", "keys", "standalone", "reports", "enrol-refused", "models"] as const;
 type RecordName = (typeof RECORDS)[number];
 /** AAD = purpose + record; the key store keeps the AAD it has always had (its files must stay readable). */
 const aadOf = (name: RecordName): string => (name === "keys" ? "tb:seal:bridge-keys:store" : `tb:seal:bridge-state:${name}`);
@@ -131,6 +164,8 @@ export class BridgeState {
   /** S6: one-time jtis (pairing codes, keys tickets) until exp + leeway */
   usedJtis: Map<string, number> = new Map();
   keyStore: KeyStore = { keysRev: 0, values: {} };
+  /** S11 (v0.1.63): model-role bindings; values stay in S3 */
+  bindings: ModelBinding[] = [];
   standalone: StandaloneOverlay | undefined;
   reports: PendingReports = { revoked: [], pairingJtis: {} };
 
@@ -229,6 +264,13 @@ export class BridgeState {
     const now = nowS();
     for (const [jti, exp] of Object.entries(this.readRecord<Record<string, number>>("jtis") ?? {})) if (exp > now) this.usedJtis.set(jti, exp);
     this.keyStore = this.readRecord<KeyStore>("keys") ?? { keysRev: 0, values: {} };
+    const models = this.readRecord<ModelsRecord>("models");
+    this.bindings = models?.bindings ?? [];
+    // a crash after the S11 write and before the key store write: the change still gets its revision
+    if (models && models.rev > this.keyStore.keysRev) {
+      this.keyStore.keysRev = models.rev;
+      this.saveKeyStore();
+    }
     this.standalone = this.readRecord<StandaloneOverlay>("standalone");
     this.reports = this.readRecord<PendingReports>("reports") ?? { revoked: [], pairingJtis: {} };
     return resealed;
@@ -318,9 +360,42 @@ export class BridgeState {
     return true;
   }
 
-  setKey(name: string, value: string | null): void {
-    if (value === null) delete this.keyStore.values[name];
-    else this.keyStore.values[name] = value;
+  /**
+   * Sets or deletes one key. `provider` marks an owner-named provider key (v0.1.63). Deleting a key that bindings use
+   * leaves those bindings without a key (BRIDGE §15.2) in the same revision: one `keysRev` bump for the whole change.
+   */
+  setKey(name: string, value: string | null, provider = false): void {
+    const named = new Set(this.keyStore.providerKeys ?? []);
+    if (value === null) {
+      delete this.keyStore.values[name];
+      named.delete(name);
+    } else {
+      this.keyStore.values[name] = value;
+      if (provider) named.add(name);
+    }
+    if (named.size || this.keyStore.providerKeys) this.keyStore.providerKeys = [...named].sort();
+    const served = value === null && this.bindings.some((b) => b.keyName === name);
+    if (served)
+      this.saveBindings(
+        this.bindings.map((b) => {
+          if (b.keyName !== name) return b;
+          const { keyName: _k, ...unset } = b;
+          return unset;
+        }),
+      );
+    else this.bumpKeys();
+  }
+
+  /** Replaces S11 (BRIDGE §15.1); bumps `keysRev` once. */
+  saveBindings(next: ModelBinding[]): void {
+    const rev = this.keyStore.keysRev + 1;
+    this.writeRecord("models", { rev, bindings: next } satisfies ModelsRecord);
+    this.bindings = next;
+    this.keyStore.keysRev = rev;
+    this.saveKeyStore();
+  }
+
+  private bumpKeys(): void {
     this.keyStore.keysRev += 1;
     this.saveKeyStore();
   }

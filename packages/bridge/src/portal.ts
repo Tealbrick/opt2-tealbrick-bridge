@@ -11,6 +11,8 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { bridgeCaps } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
+import { roleStatuses } from "./model-roles.ts";
+import type { StatusReport0163 } from "./spec-0163.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
@@ -366,7 +368,7 @@ export async function probeViews(ctx: BridgeContext): Promise<boolean> {
 const reportedAtS = new Map<string, number>();
 
 /** BRIDGE §5.6. */
-export function buildStatusReport(ctx: BridgeContext): StatusReport {
+export function buildStatusReport(ctx: BridgeContext): StatusReport0163 {
   const t = ctx.table;
   const id = ctx.identity;
   if (!id) throw new Error("not enrolled");
@@ -422,6 +424,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     portalKeysDigest: ctx.api.digest(id.portalKeys as unknown as Json),
     apps,
     keys,
+    // v0.1.63 (BRIDGE §15.5): one row per declared role per instance — labels only, never a base URL, key name or value
+    roles: roleStatuses(ctx),
     scopeSummaries: [...ctx.scopeSummaries.values()],
     connectionsCreated,
     // v0.1.14: connections that authenticated since the previous ACCEPTED report (latest time each, ≤ 500)
