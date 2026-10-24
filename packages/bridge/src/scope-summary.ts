@@ -10,6 +10,7 @@
  *    {@link LIST_MAX_AGE_MS}, and a tools/call of a scoped op that the tool list does not show ({@link MISS_MIN_AGE_MS}).
  *    An owner who widens a row then sees the tool without waiting for the app's next push. One request per app at a time.
  */
+import { SCOPE_SOURCE_LABEL_MAX, SCOPE_SOURCES_MAX, type ScopeSourceItem } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { CallRouter } from "./calls.ts";
 import type { BridgeContext } from "./context.ts";
@@ -22,6 +23,35 @@ export const LIST_MAX_AGE_MS = 30_000;
 /** a tools/call of an unlisted scoped op asks again when the last answer is older than this (bounds the load an agent can cause) */
 export const MISS_MIN_AGE_MS = 5_000;
 
+const SNAKE_RE = /^[a-z][a-z0-9_]{0,39}$/;
+/**
+ * QA (bridge#26): the app's OWN instance id only: a Tealbrick-style `<prefix>_<ULID>` or a lower-case slug. Provider-shaped ids
+ * (Stripe `cus_bYze8b07…`, Slack `C04ACME…`, a Drive id, an email, a phone number) do not match and the item is dropped.
+ */
+export const SOURCE_ID_RE = /^(?:[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}|[a-z][a-z0-9_-]{0,63})$/;
+/** At most `max` code points (never half of a surrogate pair: Postgres jsonb refuses a lone surrogate). */
+export const clampCodePoints = (s: string, max: number): string => Array.from(s).slice(0, max).join("");
+
+/**
+ * `ScopeSummaryResult.sources` → the items the status report forwards (BRIDGE §5.6): of the FIRST SCOPE_SOURCES_MAX items
+ * (then malformed ones are dropped, so fewer may remain), each well formed (snake type and access, the app's own instance id:
+ * SOURCE_ID_RE), its label without control or format characters (\p{Cc}, \p{Cf}) and at most SCOPE_SOURCE_LABEL_MAX code
+ * points; never repaired. Not an array (an SDK before 0.1.65) → undefined.
+ */
+export function scopeSourceItems(v: unknown): ScopeSourceItem[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: ScopeSourceItem[] = [];
+  for (const it of v.slice(0, SCOPE_SOURCES_MAX)) {
+    if (!it || typeof it !== "object") continue;
+    const { type, id, label, access } = it as Record<string, unknown>;
+    if (typeof type !== "string" || !SNAKE_RE.test(type) || typeof access !== "string" || !SNAKE_RE.test(access)) continue;
+    if (typeof id !== "string" || !SOURCE_ID_RE.test(id) || typeof label !== "string") continue;
+    const clean = clampCodePoints(label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim(), SCOPE_SOURCE_LABEL_MAX);
+    if (clean) out.push({ type: type as ScopeSourceItem["type"], id, label: clean, access: access as ScopeSourceItem["access"] });
+  }
+  return out;
+}
+
 /** `ScopeSummaryResult.admittedOps` → a set of well-formed op ids; anything else is dropped (display only) */
 export function admittedOpIds(v: unknown): Set<string> {
   const out = new Set<string>();
@@ -30,11 +60,11 @@ export function admittedOpIds(v: unknown): Set<string> {
   return out;
 }
 
-/** a comparable form of one instance's labels (all agents), to tell whether a refresh changed what the status report shows */
+/** a comparable form of one instance's labels and sources (all agents), to tell whether a refresh changed what the status report shows */
 function labelsKey(ctx: BridgeContext, ins: InstanceId): string {
   return [...ctx.scopeSummaries.entries()]
     .filter(([k]) => k.endsWith(`|${ins}`))
-    .map(([k, s]) => `${k}=${s.label}`)
+    .map(([k, s]) => `${k}=${s.label}=${JSON.stringify(s.sources ?? null)}`)
     .sort()
     .join(";");
 }
@@ -77,14 +107,15 @@ async function doRefresh(ctx: BridgeContext, router: CallRouter, ins: InstanceId
   // stamped before the request: a failing or slow app is not asked again at once
   ctx.scopeSummaryAt.set(ins, Date.now());
   try {
-    const list = await router.bridgeOp<{ agent: `agt_${string}`; label: string; admittedOps?: unknown }[]>(app, "scope_summary", {});
+    const list = await router.bridgeOp<{ agent: `agt_${string}`; label: string; admittedOps?: unknown; sources?: unknown }[]>(app, "scope_summary", {});
     const labelsBefore = labelsKey(ctx, ins);
     for (const k of [...ctx.scopeSummaries.keys()]) if (k.endsWith(`|${ins}`)) ctx.scopeSummaries.delete(k);
     const before = admittedKey(ctx, ins);
     for (const k of [...ctx.admittedOps.keys()]) if (k.endsWith(`|${ins}`)) ctx.admittedOps.delete(k);
     for (const s of Array.isArray(list) ? list : []) {
       if (typeof s?.agent !== "string" || typeof s.label !== "string") continue;
-      ctx.scopeSummaries.set(`${s.agent}|${ins}`, { agt: s.agent, ins, label: s.label.slice(0, 80) });
+      const sources = scopeSourceItems(s.sources);
+      ctx.scopeSummaries.set(`${s.agent}|${ins}`, { agt: s.agent, ins, label: clampCodePoints(s.label, 80), ...(sources ? { sources } : {}) });
       // C283 A1: display marks only; a missing or malformed member = none
       const admitted = admittedOpIds(s.admittedOps);
       if (admitted.size > 0) ctx.admittedOps.set(`${s.agent}|${ins}`, admitted);

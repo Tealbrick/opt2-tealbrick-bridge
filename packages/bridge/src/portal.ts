@@ -366,6 +366,66 @@ export async function probeViews(ctx: BridgeContext): Promise<boolean> {
 const reportedAtS = new Map<string, number>();
 
 /** BRIDGE §5.6. */
+/** Core reads an ack body up to 256 KiB; the bridge keeps its report below this (QA bridge#26 S2: one app pushed 443 KB). */
+export const STATUS_REPORT_MAX_BYTES = 240 * 1024;
+/** per app, after the first cut: at most this many omitted tools and scope summaries are reported */
+export const REPORT_PER_APP_MAX = 50;
+
+const reportBytes = (r: StatusReport): number => Buffer.byteLength(JSON.stringify(r), "utf8");
+
+/**
+ * Keeps a status report under STATUS_REPORT_MAX_BYTES. The lists an app can grow are cut, cheapest display data first:
+ * (1) every scope summary's `sources`; (2) omitted tools, then scope summaries, to REPORT_PER_APP_MAX per app; (3) all omitted
+ * tools; (4) all scope summaries. Each cut adds one marker per app in `rejected` (kind `bridge_op`, code
+ * `report_truncated_sources` | `report_truncated_tools` | `report_truncated_scopes`, count = items dropped), so Core and the
+ * owner see that the report is incomplete. A report already small enough is returned unchanged.
+ */
+export function boundStatusReport(report: StatusReport, maxBytes = STATUS_REPORT_MAX_BYTES): StatusReport {
+  let r = report;
+  if (reportBytes(r) <= maxBytes) return r;
+  const mark = (code: string, dropped: Map<string, number>) => {
+    for (const [ins, count] of dropped) if (count > 0) r = { ...r, rejected: [...r.rejected, { kind: "bridge_op", code, count, ins: ins as never }] };
+  };
+  const count = (items: { ins: string }[]) => items.reduce((m, i) => m.set(i.ins, (m.get(i.ins) ?? 0) + 1), new Map<string, number>());
+  // (1) sources are display only and the largest per-agent part
+  const withSources = r.scopeSummaries.filter((s) => (s as { sources?: unknown[] }).sources?.length);
+  if (withSources.length) {
+    r = { ...r, scopeSummaries: r.scopeSummaries.map(({ sources: _s, ...s }: (typeof r.scopeSummaries)[number] & { sources?: unknown }) => s) };
+    mark("report_truncated_sources", count(withSources));
+    if (reportBytes(r) <= maxBytes) return r;
+  }
+  // (2) per app caps
+  const capPerApp = <T extends { ins: string }>(items: T[]): { kept: T[]; dropped: Map<string, number> } => {
+    const seen = new Map<string, number>();
+    const dropped = new Map<string, number>();
+    const kept = items.filter((i) => {
+      const n = (seen.get(i.ins) ?? 0) + 1;
+      seen.set(i.ins, n);
+      if (n <= REPORT_PER_APP_MAX) return true;
+      dropped.set(i.ins, (dropped.get(i.ins) ?? 0) + 1);
+      return false;
+    });
+    return { kept, dropped };
+  };
+  const tools = capPerApp(r.toolsOmitted);
+  r = { ...r, toolsOmitted: tools.kept };
+  mark("report_truncated_tools", tools.dropped);
+  if (reportBytes(r) <= maxBytes) return r;
+  const scopes = capPerApp(r.scopeSummaries);
+  r = { ...r, scopeSummaries: scopes.kept };
+  mark("report_truncated_scopes", scopes.dropped);
+  if (reportBytes(r) <= maxBytes) return r;
+  // (3) and (4): drop the lists whole
+  const allTools = count(r.toolsOmitted);
+  r = { ...r, toolsOmitted: [] };
+  mark("report_truncated_tools", allTools);
+  if (reportBytes(r) <= maxBytes) return r;
+  const allScopes = count(r.scopeSummaries);
+  r = { ...r, scopeSummaries: [] };
+  mark("report_truncated_scopes", allScopes);
+  return r;
+}
+
 export function buildStatusReport(ctx: BridgeContext): StatusReport {
   const t = ctx.table;
   const id = ctx.identity;
@@ -413,7 +473,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       if (!reportedAtS.has(r.con)) reportedAtS.set(r.con, now);
       return { con: r.con, agt: r.agt, method: "pairing" as const, clientName: r.clientName, createdAt: new Date(r.createdAt * 1000).toISOString(), pairingJti: ctx.state.reports.pairingJtis[r.con] ?? "" };
     });
-  return {
+  return boundStatusReport({
     rev: t?.rev ?? 0,
     appliedAt: new Date().toISOString(),
     // spec 0.1.54 (C292): the capabilities this build implements, in EVERY report (caps.ts: only with the code they name)
@@ -435,7 +495,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     toolsOmitted: [...ctx.toolsOmitted.values()],
     // spec 0.1.43 (LA-1): only when the workspace has a views service (TB_VIEWS_PUBLIC_URL); a probe has not run yet → not ok
     ...(ctx.viewsUrl ? { views: { url: ctx.viewsUrl, ok: ctx.views?.ok ?? false, lastCheckAt: ctx.views?.lastCheckAt ?? new Date(0).toISOString() } } : {}),
-  };
+  });
 }
 
 
