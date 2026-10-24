@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { CallRouter } from "../src/calls.ts";
-import { buildStatusReport } from "../src/portal.ts";
+import { buildStatusReport, STATUS_REPORT_MAX_BYTES } from "../src/portal.ts";
 import { type AppClient, claimApp } from "./support/app-client.ts";
 import { AGT, AGT2, BRG, CON, INS, makeWorld, notesManifest, type World, WS, waitFor } from "./support/world.ts";
 
@@ -191,6 +191,19 @@ describe("C283 A1: owner-row filter (bridge 0.2.5)", () => {
     } finally {
       w.bridge.ctx.off("health", count);
       sources = undefined;
+    }
+  });
+
+  test("QA bridge#26 (wiring): buildStatusReport applies the size bound", () => {
+    const before = new Map(w.bridge.ctx.toolsOmitted);
+    try {
+      for (let i = 0; i < 4000; i++) w.bridge.ctx.toolsOmitted.set(`${INS}|big_${i}`, { ins: INS as never, name: `${"x".repeat(110)}_${i}`, code: "ceiling" });
+      const report = buildStatusReport(w.bridge.ctx);
+      assert.ok(Buffer.byteLength(JSON.stringify(report), "utf8") <= STATUS_REPORT_MAX_BYTES);
+      assert.ok(report.rejected.some((x) => x.kind === "bridge_op" && x.code === "report_truncated_tools" && x.ins === INS));
+    } finally {
+      w.bridge.ctx.toolsOmitted.clear();
+      for (const [k, v] of before) w.bridge.ctx.toolsOmitted.set(k, v);
     }
   });
 

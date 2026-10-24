@@ -368,61 +368,81 @@ const reportedAtS = new Map<string, number>();
 /** BRIDGE §5.6. */
 /** Core reads an ack body up to 256 KiB; the bridge keeps its report below this (QA bridge#26 S2: one app pushed 443 KB). */
 export const STATUS_REPORT_MAX_BYTES = 240 * 1024;
-/** per app, after the first cut: at most this many omitted tools and scope summaries are reported */
+/** per app, after the first cuts: at most this many omitted tools and scope summaries are reported */
 export const REPORT_PER_APP_MAX = 50;
+/** QA bridge#26 round 2: an app's `attention.reason` is shortened to this many code points when the report is too large */
+export const REPORT_ATTENTION_MAX = 500;
 
-const reportBytes = (r: StatusReport): number => Buffer.byteLength(JSON.stringify(r), "utf8");
+const jsonBytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");
+type ReportApp = StatusReport["apps"][number];
+type ScopeRow = StatusReport["scopeSummaries"][number] & { sources?: unknown[] };
 
 /**
- * Keeps a status report under STATUS_REPORT_MAX_BYTES. The lists an app can grow are cut, cheapest display data first:
- * (1) every scope summary's `sources`; (2) omitted tools, then scope summaries, to REPORT_PER_APP_MAX per app; (3) all omitted
- * tools; (4) all scope summaries. Each cut adds one marker per app in `rejected` (kind `bridge_op`, code
- * `report_truncated_sources` | `report_truncated_tools` | `report_truncated_scopes`, count = items dropped), so Core and the
- * owner see that the report is incomplete. A report already small enough is returned unchanged.
+ * Keeps a status report under STATUS_REPORT_MAX_BYTES. Only what apps can grow is cut, cheapest display data first and always
+ * from the app that grew most first: (1) `sources` of the scope summaries, app by app (heaviest first); (2) `attention.reason`
+ * shortened to REPORT_ATTENTION_MAX code points, app by app; (3) omitted tools, then scope summaries, to REPORT_PER_APP_MAX per
+ * app; (4) all omitted tools, then all scope summaries; (5) `attention` itself. Each cut adds one marker per app in `rejected`
+ * (kind `bridge_op`, code `report_truncated_sources` | `_attention` | `_tools` | `_scopes`, count = items cut), so Core and the
+ * owner see that the report is incomplete. A report already small enough is returned unchanged (the same object).
  */
 export function boundStatusReport(report: StatusReport, maxBytes = STATUS_REPORT_MAX_BYTES): StatusReport {
   let r = report;
-  if (reportBytes(r) <= maxBytes) return r;
-  const mark = (code: string, dropped: Map<string, number>) => {
-    for (const [ins, count] of dropped) if (count > 0) r = { ...r, rejected: [...r.rejected, { kind: "bridge_op", code, count, ins: ins as never }] };
+  const fits = () => jsonBytes(r) <= maxBytes;
+  if (fits()) return r;
+  const mark = (code: string, ins: string, count: number) => {
+    if (count > 0) r = { ...r, rejected: [...r.rejected, { kind: "bridge_op", code, count, ins: ins as never }] };
   };
-  const count = (items: { ins: string }[]) => items.reduce((m, i) => m.set(i.ins, (m.get(i.ins) ?? 0) + 1), new Map<string, number>());
-  // (1) sources are display only and the largest per-agent part
-  const withSources = r.scopeSummaries.filter((s) => (s as { sources?: unknown[] }).sources?.length);
-  if (withSources.length) {
-    r = { ...r, scopeSummaries: r.scopeSummaries.map(({ sources: _s, ...s }: (typeof r.scopeSummaries)[number] & { sources?: unknown }) => s) };
-    mark("report_truncated_sources", count(withSources));
-    if (reportBytes(r) <= maxBytes) return r;
+  const heaviest = (weights: Map<string, number>) => [...weights.entries()].filter(([, w]) => w > 0).sort((a, b) => b[1] - a[1]);
+  // (1) sources, from the app with the most bytes of them
+  const sourceBytes = new Map<string, number>();
+  for (const s of r.scopeSummaries as ScopeRow[]) if (s.sources?.length) sourceBytes.set(s.ins, (sourceBytes.get(s.ins) ?? 0) + jsonBytes(s.sources));
+  for (const [ins] of heaviest(sourceBytes)) {
+    const rows = r.scopeSummaries as ScopeRow[];
+    const cut = rows.filter((s) => s.ins === ins && s.sources?.length).length;
+    r = { ...r, scopeSummaries: rows.map((s) => (s.ins === ins ? (({ sources: _x, ...rest }: ScopeRow) => rest)(s) : s)) };
+    mark("report_truncated_sources", ins, cut);
+    if (fits()) return r;
   }
-  // (2) per app caps
-  const capPerApp = <T extends { ins: string }>(items: T[]): { kept: T[]; dropped: Map<string, number> } => {
+  // (2) attention reasons, from the longest
+  const attentionBytes = new Map<string, number>(r.apps.filter((a) => a.attention).map((a) => [a.ins, jsonBytes(a.attention)]));
+  for (const [ins] of heaviest(attentionBytes)) {
+    const app = r.apps.find((a) => a.ins === ins);
+    const reason = (app?.attention as { reason?: unknown } | undefined)?.reason;
+    if (!app?.attention || typeof reason !== "string" || Array.from(reason).length <= REPORT_ATTENTION_MAX) continue;
+    const short = Array.from(reason.toWellFormed()).slice(0, REPORT_ATTENTION_MAX).join("");
+    r = { ...r, apps: r.apps.map((a): ReportApp => (a.ins === ins ? { ...a, attention: { ...(a.attention as object), reason: short } as ReportApp["attention"] } : a)) };
+    mark("report_truncated_attention", ins, 1);
+    if (fits()) return r;
+  }
+  // (3) per app caps
+  const capPerApp = <T extends { ins: string }>(items: T[], code: string): T[] => {
     const seen = new Map<string, number>();
-    const dropped = new Map<string, number>();
     const kept = items.filter((i) => {
       const n = (seen.get(i.ins) ?? 0) + 1;
       seen.set(i.ins, n);
-      if (n <= REPORT_PER_APP_MAX) return true;
-      dropped.set(i.ins, (dropped.get(i.ins) ?? 0) + 1);
-      return false;
+      return n <= REPORT_PER_APP_MAX;
     });
-    return { kept, dropped };
+    for (const [ins, n] of seen) mark(code, ins, n - REPORT_PER_APP_MAX);
+    return kept;
   };
-  const tools = capPerApp(r.toolsOmitted);
-  r = { ...r, toolsOmitted: tools.kept };
-  mark("report_truncated_tools", tools.dropped);
-  if (reportBytes(r) <= maxBytes) return r;
-  const scopes = capPerApp(r.scopeSummaries);
-  r = { ...r, scopeSummaries: scopes.kept };
-  mark("report_truncated_scopes", scopes.dropped);
-  if (reportBytes(r) <= maxBytes) return r;
-  // (3) and (4): drop the lists whole
-  const allTools = count(r.toolsOmitted);
+  // capPerApp adds markers to `r`: take the kept list first, then build on the updated `r`
+  const keptTools = capPerApp(r.toolsOmitted, "report_truncated_tools");
+  r = { ...r, toolsOmitted: keptTools };
+  if (fits()) return r;
+  const keptScopes = capPerApp(r.scopeSummaries, "report_truncated_scopes");
+  r = { ...r, scopeSummaries: keptScopes };
+  if (fits()) return r;
+  // (4) the lists whole
+  const countBy = (items: { ins: string }[]) => items.reduce((m, i) => m.set(i.ins, (m.get(i.ins) ?? 0) + 1), new Map<string, number>());
+  for (const [ins, n] of countBy(r.toolsOmitted)) mark("report_truncated_tools", ins, n);
   r = { ...r, toolsOmitted: [] };
-  mark("report_truncated_tools", allTools);
-  if (reportBytes(r) <= maxBytes) return r;
-  const allScopes = count(r.scopeSummaries);
+  if (fits()) return r;
+  for (const [ins, n] of countBy(r.scopeSummaries)) mark("report_truncated_scopes", ins, n);
   r = { ...r, scopeSummaries: [] };
-  mark("report_truncated_scopes", allScopes);
+  if (fits()) return r;
+  // (5) attention itself
+  for (const a of r.apps) if (a.attention) mark("report_truncated_attention", a.ins, 1);
+  r = { ...r, apps: r.apps.map(({ attention: _a, ...a }) => a as ReportApp) };
   return r;
 }
 

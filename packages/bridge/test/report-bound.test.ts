@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { StatusReport } from "@opt2-tealbrick/spec/bridge";
-import { boundStatusReport, REPORT_PER_APP_MAX, STATUS_REPORT_MAX_BYTES } from "../src/portal.ts";
-import { clampCodePoints, SOURCE_ID_RE, scopeSourceItems } from "../src/scope-summary.ts";
+import { boundStatusReport, REPORT_ATTENTION_MAX, REPORT_PER_APP_MAX, STATUS_REPORT_MAX_BYTES } from "../src/portal.ts";
+import { clampCodePoints, isOwnInstanceId, SOURCE_ID_RE, scopeSourceItems } from "../src/scope-summary.ts";
 
 const INS = "ins_01M5Q00000000000000000BIG0";
 const INS2 = "ins_01M5Q00000000000000000SMAL";
@@ -36,6 +36,32 @@ test("S2: one app with thousands of omitted tools is cut per app with a marker; 
   assert.equal(marker(out, "report_truncated_tools", INS2), undefined);
 });
 
+test("sources are stripped only from the app that grew; another app keeps its sources", () => {
+  const r = base();
+  const big = Array.from({ length: 20 }, (_, i) => ({ type: "account", id: `acc_${i}`, label: "L".repeat(60), access: "read" }));
+  const small = [{ type: "account", id: "acc_small", label: "Small", access: "read" }];
+  r.scopeSummaries = [
+    ...Array.from({ length: 300 }, (_, i) => ({ agt: `agt_${i}` as never, ins: INS as never, label: "1 account", sources: big }) as never),
+    { agt: "agt_small" as never, ins: INS2 as never, label: "1 account", sources: small } as never,
+  ];
+  const out = boundStatusReport(r);
+  assert.ok(bytes(out) <= STATUS_REPORT_MAX_BYTES);
+  assert.deepEqual((out.scopeSummaries.find((s) => s.ins === INS2) as { sources?: unknown[] }).sources, small);
+  assert.equal(marker(out, "report_truncated_sources", INS2), undefined);
+});
+
+test("QA round 2: long attention reasons of many apps are shortened (heaviest first), with a marker per app", () => {
+  const r = base();
+  r.apps = Array.from({ length: 64 }, (_, i) => ({ ins: `ins_${i}` as never, state: "degraded", version: "1.0.0", sdkVersion: "0.1.38", manifestDigest: null, lastSeen: null, pendingHolds: 0, attention: { code: "engine_down", reason: "R".repeat(16_000) } }) as never);
+  assert.ok(bytes(r) > STATUS_REPORT_MAX_BYTES);
+  const out = boundStatusReport(r);
+  assert.ok(bytes(out) <= STATUS_REPORT_MAX_BYTES);
+  const reasons = out.apps.map((a) => (a.attention as { reason: string } | undefined)?.reason.length ?? 0);
+  assert.ok(reasons.some((n) => n === REPORT_ATTENTION_MAX), "shortened, not dropped");
+  assert.ok(out.apps.every((a) => (a.attention as { code: string } | undefined)?.code === "engine_down"), "the code stays");
+  assert.ok(out.rejected.filter((x) => x.code === "report_truncated_attention").length > 0);
+});
+
 test("sources go first: when dropping them is enough, nothing else is cut", () => {
   const r = base();
   const sources = Array.from({ length: 20 }, (_, i) => ({ type: "account", id: `acc_${i}`, label: "L".repeat(60), access: "read" }));
@@ -58,13 +84,26 @@ test("scope summaries are cut per app, then dropped whole, only when still over"
 });
 
 test("the source id is the app's own: Tealbrick ids and slugs pass, provider-shaped ids are dropped", () => {
-  for (const id of ["cna_01M5PNG40MSQ8RJG3CEZ95Z0ZY", "company", "nb_1", "area-sales"]) assert.ok(SOURCE_ID_RE.test(id), id);
+  // the ids the apps use today: Connect accounts, Task Board projects and agent projects, Knowledge areas
+  for (const id of ["cna_01M5PNG40MSQ8RJG3CEZ95Z0ZY", "prj_01M5PNG40MSQ8RJG3CEZ95Z0ZY", "agt_01M5PM72GE2Q843A6AJ77DWQH0", "company", "agent-01m5pm72ge2q843a6aj77dwqh0", "nb_1", "area-sales"]) {
+    assert.ok(isOwnInstanceId(id), id);
+  }
   for (const id of ["cus_bYze8b07KDY7UK", "C04ACMESUPP", "U0HUMAN001", "1hP4rQ7vXyZ", "ann@example.test", "14155550100", "", "x".repeat(65)]) assert.ok(!SOURCE_ID_RE.test(id), id);
+  // QA round 2: lower-case provider-shaped ids
+  for (const id of ["3f2504e0-4f89-11d3-9a0c-0305e82c3301", "acct_1nfj39fjk2", "cus_ab12cd34ef", "ch_3mmllrlkdiwhu7ix"]) assert.ok(!isOwnInstanceId(id), id);
   const items = scopeSourceItems([
     { type: "account", id: "cna_01M5PNG40MSQ8RJG3CEZ95Z0ZY", label: "Acme data", access: "read" },
     { type: "account", id: "cus_bYze8b07KDY7UK", label: "Stripe customer", access: "read" },
   ]);
   assert.deepEqual(items?.map((i) => i.id), ["cna_01M5PNG40MSQ8RJG3CEZ95Z0ZY"]);
+});
+
+test("QA round 2: a lone surrogate already in the input label becomes U+FFFD (Postgres jsonb would refuse the report)", () => {
+  const lone = String.fromCharCode(0xd83d);
+  const items = scopeSourceItems([{ type: "account", id: "acc_1", label: `Team ${lone}notes`, access: "read" }]);
+  assert.equal(items?.[0]?.label, `Team ${String.fromCharCode(0xfffd)}notes`);
+  assert.equal(items?.[0]?.label.isWellFormed(), true);
+  assert.equal(clampCodePoints(`x${String.fromCharCode(0xdc00)}`, 60).isWellFormed(), true);
 });
 
 test("labels are cut at a code point: no lone surrogate", () => {

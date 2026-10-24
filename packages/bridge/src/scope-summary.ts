@@ -29,8 +29,15 @@ const SNAKE_RE = /^[a-z][a-z0-9_]{0,39}$/;
  * (Stripe `cus_bYze8b07…`, Slack `C04ACME…`, a Drive id, an email, a phone number) do not match and the item is dropped.
  */
 export const SOURCE_ID_RE = /^(?:[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}|[a-z][a-z0-9_-]{0,63})$/;
-/** At most `max` code points (never half of a surrogate pair: Postgres jsonb refuses a lone surrogate). */
-export const clampCodePoints = (s: string, max: number): string => Array.from(s).slice(0, max).join("");
+/** QA bridge#26 round 2: lower-case ids that still look like a provider's (a UUID; a Stripe-style `acct_1nfj39…` token). */
+const PROVIDER_LIKE_RES = [/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, /^[a-z]{2,8}_(?=[a-z0-9]*[0-9])[a-z0-9]{8,}$/];
+/** The app's own scope instance id (`cna_<ULID>`, `company`, `agent-<ulid>`); provider-shaped ids are not. */
+export const isOwnInstanceId = (id: string): boolean => SOURCE_ID_RE.test(id) && !PROVIDER_LIKE_RES.some((re) => re.test(id));
+/**
+ * At most `max` code points of a well-formed string: a lone surrogate (already in the input, or made by a cut) becomes U+FFFD
+ * first, and the cut never splits a pair (Postgres jsonb refuses a lone surrogate, so one app could fail every ack).
+ */
+export const clampCodePoints = (s: string, max: number): string => Array.from(s.toWellFormed()).slice(0, max).join("");
 
 /**
  * `ScopeSummaryResult.sources` → the items the status report forwards (BRIDGE §5.6): of the FIRST SCOPE_SOURCES_MAX items
@@ -45,8 +52,8 @@ export function scopeSourceItems(v: unknown): ScopeSourceItem[] | undefined {
     if (!it || typeof it !== "object") continue;
     const { type, id, label, access } = it as Record<string, unknown>;
     if (typeof type !== "string" || !SNAKE_RE.test(type) || typeof access !== "string" || !SNAKE_RE.test(access)) continue;
-    if (typeof id !== "string" || !SOURCE_ID_RE.test(id) || typeof label !== "string") continue;
-    const clean = clampCodePoints(label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim(), SCOPE_SOURCE_LABEL_MAX);
+    if (typeof id !== "string" || !isOwnInstanceId(id) || typeof label !== "string") continue;
+    const clean = clampCodePoints(label.toWellFormed().replace(/[\p{Cc}\p{Cf}]/gu, "").trim(), SCOPE_SOURCE_LABEL_MAX);
     if (clean) out.push({ type: type as ScopeSourceItem["type"], id, label: clean, access: access as ScopeSourceItem["access"] });
   }
   return out;
