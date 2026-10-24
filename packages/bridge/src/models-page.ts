@@ -6,21 +6,28 @@
  * never calls a provider: there is no "test" button (§1.1).
  */
 import type { ServerResponse } from "node:http";
-import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
+import type { ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
+import type { InstanceId, PersonTicketKeysClaims } from "@opt2-tealbrick/spec/credentials";
+import { DATA_POLICY_RANK, type DataPolicy, MODEL_ID_PATTERN, MODEL_ROLE_HINTS_MAX, MODEL_ROLES, type ModelRole } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
-import { baseUrlOf, boundKey, effectivePolicy, isDataPolicy, isModelRole, localUrlOk, policyMeets, providerById, roleRequirements } from "./model-roles.ts";
-import { appChip, esc, htmlPage, ink, linkButton, type PageApp, pageApp } from "./pages.ts";
 import {
-  DATA_POLICY_RANK,
-  type DataPolicy,
-  MODEL_ID_PATTERN,
-  MODEL_PROVIDERS,
-  MODEL_ROLE_HINTS_MAX,
-  MODEL_ROLES,
-  type ModelRole,
-  type ModelRoleRequirementEntry,
-  type PersonTicketKeysClaims0163,
-} from "./spec-0163.ts";
+  baseUrlOf,
+  boundKey,
+  classifyBase,
+  classifyOwnHost,
+  effectiveGateway,
+  effectivePolicy,
+  isDataPolicy,
+  isModelRole,
+  type OwnNet,
+  ownNet,
+  policyMeets,
+  providerById,
+  resolveBinding,
+  roleRequirements,
+} from "./model-roles.ts";
+import { appChip, esc, htmlPage, ink, linkButton, type PageApp, pageApp } from "./pages.ts";
+import { MODEL_PROVIDERS, OWN_HOSTS_MAX, type PolicyBasis } from "./spec-followup.ts";
 import type { ModelBinding } from "./state.ts";
 import type { Table } from "./table.ts";
 
@@ -36,7 +43,7 @@ export interface RoleHint {
 export type ModelsOutcome =
   | { kind: "saved"; flash: string }
   | { kind: "refused"; code: string; reason: string }
-  | { kind: "confirm"; title: string; text: string; fields: Record<string, string>; button: string };
+  | { kind: "confirm"; title: string; text: string; fields: Record<string, string>; button: string; /** a change was stored before the question */ saved?: true };
 
 export const PROVIDER_KEY_LABEL_MAX = 60;
 export const PROVIDER_KEYS_MAX = 32;
@@ -59,12 +66,17 @@ const ROLE_LABEL: Record<ModelRole, string> = {
   vision: "Vision",
   transcribe: "Transcribe",
 };
-const POLICY_LABEL: Record<DataPolicy, string> = { local: "Local (own network)", zdr: "Zero data retention", standard: "Standard" };
+/** spec follow-up #49 (RM-18): every `zdr` label reads "zero data retention (owner-attested)" */
+const POLICY_LABEL: Record<DataPolicy, string> = { local: "local (own network)", zdr: "zero data retention (owner-attested)", standard: "standard" };
+/** spec follow-up #49 (QA-SPEC49-2): the label of a policy as it holds now; owner-listed local is not verified */
+const policyText = (e: { policy: DataPolicy; basis: PolicyBasis }) => (e.policy === "local" && e.basis === "owner_attested" ? "local (owner-listed, not verified)" : POLICY_LABEL[e.policy]);
 const ZDR_TICK = "I confirm a zero-data-retention contract with this provider";
+/** spec follow-up #49 (QA-SPEC42-11): a gateway attestation names the host */
+const gatewayTick = (host: string) => `I confirm that my contract with ${host} keeps no data for every model it routes this role to`;
 const REINDEX_WARNING = "Apps must re-index their memory after this change; each app asks you first";
 
 /** ticket `roles[]` → at most MODEL_ROLE_HINTS_MAX well-formed hints (unknown values dropped) */
-export function hintsFrom(claims: PersonTicketKeysClaims0163): RoleHint[] {
+export function hintsFrom(claims: PersonTicketKeysClaims): RoleHint[] {
   if (!Array.isArray(claims.roles)) return [];
   const out: RoleHint[] = [];
   for (const h of claims.roles.slice(0, MODEL_ROLE_HINTS_MAX)) {
@@ -195,7 +207,7 @@ function bindingForm(ctx: BridgeContext, t: Table, csrf: string, v: RoleView, id
       ${field("model", "Model", `<input class="tb-input" id="${id}-model" name="model" maxlength="${MODEL_MAX}" autocomplete="off" required value="${esc(init.model ?? "")}">`)}
       ${field("baseUrl", "Base URL", `<input class="tb-input" id="${id}-baseUrl" name="baseUrl" maxlength="${URL_MAX}" autocomplete="off" inputmode="url" value="${esc(init.baseUrl ?? "")}">`, "Leave empty to use the provider's own address. Own servers need one.")}
       ${field("keyName", "Key", `<select class="tb-select-native" id="${id}-keyName" name="keyName">${keyOptions(ctx, t, init.keyName)}</select>`, "Own-server providers need no key.")}
-      ${field("dataPolicy", "Data policy", `<select class="tb-select-native" id="${id}-dataPolicy" name="dataPolicy">${pol}</select>`, `Local needs an address on your own network. Zero data retention: ${zdrNames.join(", ") || "no provider for this role"}; the bridge cannot check a contract.`)}
+      ${field("dataPolicy", "Data policy", `<select class="tb-select-native" id="${id}-dataPolicy" name="dataPolicy">${pol}</select>`, `Local needs an address on your own network. ${POLICY_LABEL.zdr}: ${zdrNames.join(", ") || "no provider for this role"}; the bridge cannot check a contract. For a gateway (OpenRouter, LiteLLM, a custom address) you confirm on the next page, naming its host.`)}
       <label class="tb-check"><input type="checkbox" name="zdr" value="1"> ${esc(ZDR_TICK)}</label>${
         v.role === "embeddings"
           ? `\n      ${field("dims", "Vector size (optional)", `<input class="tb-input" id="${id}-dims" name="dims" inputmode="numeric" pattern="[0-9]*" value="${init.dims ?? ""}">`)}${isSet ? `\n      <p class="tb-notice needs-you">${esc(`${REINDEX_WARNING}.`)}</p><label class="tb-check"><input type="checkbox" name="reindex" value="1"> I understand</label>` : ""}`
@@ -207,7 +219,7 @@ function bindingForm(ctx: BridgeContext, t: Table, csrf: string, v: RoleView, id
 function bindingText(ctx: BridgeContext, b: ModelBinding): string {
   const p = providerById(b.provider);
   const key = p && !p.keyNeeded ? "no key" : b.keyName && Object.hasOwn(ctx.state.keyStore.values, b.keyName) ? `key ${b.keyName}` : "key not set";
-  return [p?.label ?? b.provider, b.model, baseUrlOf(b) ?? "no address", key, POLICY_LABEL[effectivePolicy(b, ctx.ownInfraOrigins)]].join(" · ");
+  return [p?.label ?? b.provider, b.model, baseUrlOf(b) ?? "no address", key, policyText(effectivePolicy(b, ownNet(ctx)))].join(" · ");
 }
 
 /** The Models section: one row per declared role (none when the config declares none). */
@@ -224,7 +236,7 @@ export function renderModels(ctx: BridgeContext, t: Table, csrf: string, hints: 
       const states = v.entries.map((e) => {
         const b = overrides.find((o) => o.ins === e.ins) ?? def;
         if (!b || boundKey(b, ctx.state.keyStore.values) === undefined) return "unset";
-        return policyMeets(effectivePolicy(b, ctx.ownInfraOrigins), e.minPolicy) ? "ok" : "low";
+        return policyMeets(effectivePolicy(b, ownNet(ctx)).policy, e.minPolicy) ? "ok" : "low";
       });
       const tag = states.includes("low")
         ? `<span class="tb-tag needs-you">${ink("Policy too low")}</span>`
@@ -298,6 +310,8 @@ export function applyModelsPost(ctx: BridgeContext, t: Table, form: URLSearchPar
   if (action === "pkey_delete") return deleteProviderKey(ctx, t, form);
   if (action === "bind") return bind(ctx, t, form);
   if (action === "unbind") return unbind(ctx, t, form);
+  if (action === "host_add") return addOwnHost(ctx, form);
+  if (action === "host_remove") return removeOwnHost(ctx, t, form);
   return undefined;
 }
 
@@ -328,19 +342,6 @@ function deleteProviderKey(ctx: BridgeContext, t: Table, form: URLSearchParams):
   return { kind: "saved", flash: `Deleted ${label}.` };
 }
 
-/** a base URL as the owner typed it: empty, or an http(s) URL without credentials or fragment */
-function parseBaseUrl(raw: string): string | undefined | null {
-  if (!raw) return undefined;
-  if (raw.length > URL_MAX || CONTROL.test(raw)) return null;
-  try {
-    const u = new URL(raw);
-    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || u.hash) return null;
-    return raw;
-  } catch {
-    return null;
-  }
-}
-
 function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome {
   const role = form.get("role");
   if (!isModelRole(role)) return refused("role_unknown", "this kind of model is unknown.");
@@ -353,21 +354,31 @@ function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcom
   if (!provider?.roles.includes(role)) return refused("provider_invalid", "choose a provider from the list.");
   const model = (form.get("model") ?? "").trim();
   if (!MODEL_ID.test(model)) return refused("model_invalid", `enter a model name: at most ${MODEL_MAX} letters, digits and . _ : / @ + - (no spaces, no "//").`);
-  const baseUrl = parseBaseUrl((form.get("baseUrl") ?? "").trim());
-  if (baseUrl === null) return refused("base_url_invalid", "the base URL must be an http or https address without a user name or password.");
-  if (!baseUrl && !provider.defaultBaseUrl) return refused("base_url_missing", `${provider.label} needs a base URL.`);
-  const url = baseUrl ?? provider.defaultBaseUrl ?? null;
-  const local = localUrlOk(url, ctx.ownInfraOrigins);
-  // a key must not travel in clear text over a network the owner does not control
-  if (url?.startsWith("http:") && !local) return refused("base_url_insecure", "use an https address, or an address on your own network.");
+  // §15.3: input hygiene, transport rule and the canonical form (the only form stored and served)
+  const raw = form.get("baseUrl") ?? "";
+  if (raw.length > URL_MAX) return refused("base_url_invalid", `the base URL is too long (at most ${URL_MAX} characters).`);
+  if (!raw && !provider.defaultBaseUrl) return refused("base_url_missing", `${provider.label} needs a base URL.`);
+  const checked = classifyBase(raw || (provider.defaultBaseUrl as string), ownNet(ctx));
+  if ("refused" in checked) return refused("base_url_invalid", checked.refused);
+  const baseUrl = raw ? checked.href : undefined;
+  const url = checked.href;
+  const local = checked.cls !== "not_local";
   const keyName = provider.keyNeeded ? (form.get("keyName") ?? "") || undefined : undefined;
   if (keyName && !Object.hasOwn(ctx.state.keyStore.values, keyName)) return refused("key_unknown", "choose a key from the list.");
   const asked = form.get("dataPolicy") ?? "";
   if (asked && !isDataPolicy(asked)) return refused("policy_invalid", "choose a data policy from the list.");
   const dataPolicy: DataPolicy = asked ? (asked as DataPolicy) : local ? "local" : "standard";
-  if (dataPolicy === "local" && !local) return refused("policy_local_refused", "Local needs a base URL on your own network (a private address, a Railway private host, a tailnet name or an origin in TB_OWN_INFRA_ORIGINS).");
+  if (dataPolicy === "local" && !local) return refused("policy_local_refused", "Local needs a base URL on your own network (a private address, a Railway private host, or an origin in Own hosts or TB_OWN_INFRA_ORIGINS). Tailnet names and addresses count only when listed in Own hosts.");
   if (dataPolicy === "zdr" && !provider.zdrOffered) return refused("policy_zdr_refused", `${provider.label} does not offer a zero-data-retention contract.`);
-  if (dataPolicy === "zdr" && form.get("zdr") !== "1") return refused("policy_zdr_unconfirmed", `tick "${ZDR_TICK}".`);
+  const prev = ctx.state.bindings.find((b) => b.role === role && b.ins === ins);
+  // §15.3: an attestation survives a save only for the same provider and base URL (and, for an effective gateway, the same
+  // model); an effective gateway (QA-SPEC49-4) attests on a page that names its host
+  const gateway = effectiveGateway(provider, baseUrl);
+  const host = new URL(url).hostname;
+  const attestedNow = dataPolicy === "zdr" && (gateway ? form.get("zdr_host") === host : form.get("zdr") === "1");
+  const kept = prev?.dataPolicy === "zdr" && prev.zdrAttestedAt && prev.provider === provider.id && (prev.baseUrl ?? "") === (baseUrl ?? "") && (!gateway || prev.model === model) ? prev.zdrAttestedAt : undefined;
+  const zdrAttestedAt = dataPolicy !== "zdr" ? undefined : attestedNow ? new Date().toISOString() : kept;
+  if (dataPolicy === "zdr" && !zdrAttestedAt && !gateway) return refused("policy_zdr_unconfirmed", `tick "${ZDR_TICK}".`);
   const dimsRaw = (form.get("dims") ?? "").trim();
   const dims = role === "embeddings" && dimsRaw ? Number(dimsRaw) : undefined;
   if (dims !== undefined && !(Number.isInteger(dims) && dims >= 1 && dims <= 65536)) return refused("dims_invalid", "the vector size must be a whole number from 1 to 65536.");
@@ -379,10 +390,9 @@ function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcom
     ...(baseUrl ? { baseUrl } : {}),
     ...(keyName ? { keyName } : {}),
     dataPolicy,
-    ...(dataPolicy === "zdr" ? { zdrAttestedAt: new Date().toISOString() } : {}),
+    ...(zdrAttestedAt ? { zdrAttestedAt } : {}),
     ...(dims !== undefined ? { dims } : {}),
   };
-  const prev = ctx.state.bindings.find((b) => b.role === role && b.ins === ins);
   // MANIFEST §7.1: a changed embeddings model means a re-index; the owner confirms the warning first
   if (role === "embeddings" && prev && (prev.provider !== next.provider || prev.model !== next.model || prev.dims !== next.dims) && form.get("reindex") !== "1") {
     return refused("reindex_unconfirmed", `${REINDEX_WARNING}. Tick "I understand" to change it.`);
@@ -391,6 +401,11 @@ function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcom
   if (Buffer.byteLength(JSON.stringify(bindings)) > BINDINGS_MAX_BYTES) return refused("too_many_models", "too many model settings. Remove an override first.");
   ctx.state.saveBindings(bindings);
   ctx.log.info("bridge.models.bound", { role, ...(ins ? { ins } : {}), provider: provider.id, dataPolicy, keysRev: ctx.state.keyStore.keysRev });
+  if (dataPolicy === "zdr" && !zdrAttestedAt) {
+    // an effective gateway without a current attestation: stored, counts as `standard` until the owner confirms for this host
+    const fields = Object.fromEntries([...form].filter(([k]) => k !== "csrf" && k !== "confirm"));
+    return { kind: "confirm", saved: true, title: "Confirm zero data retention", text: `${gatewayTick(host)}. Until you confirm, this model counts as standard.`, fields: { ...fields, zdr_host: host }, button: "I confirm" };
+  }
   return { kind: "saved", flash: `Saved the model for ${ROLE_LABEL[role]}${ins ? ` (${appName(ctx, productOf(t, ins))})` : ""}.` };
 }
 
@@ -402,4 +417,60 @@ function unbind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutc
   ctx.state.saveBindings(ctx.state.bindings.filter((b) => b !== prev));
   ctx.log.info("bridge.models.unbound", { role, ...(ins ? { ins } : {}), keysRev: ctx.state.keyStore.keysRev });
   return { kind: "saved", flash: `Removed the model for ${ROLE_LABEL[role]}${ins ? ` (${appName(ctx, productOf(t, ins))})` : ""}.` };
+}
+
+// ── "Own hosts" (spec follow-up #49, §15.3): origins the owner states are on their own network ──
+
+function addOwnHost(ctx: BridgeContext, form: URLSearchParams): ModelsOutcome {
+  const raw = form.get("origin") ?? "";
+  if (raw.length > URL_MAX) return refused("own_host_invalid", `the address is too long (at most ${URL_MAX} characters).`);
+  const r = classifyOwnHost(raw);
+  if ("refused" in r) return refused("own_host_invalid", r.refused);
+  const hosts = ctx.state.ownHosts;
+  if (hosts.includes(r.href)) return { kind: "saved", flash: `${r.href} is already in Own hosts.` };
+  if (hosts.length >= OWN_HOSTS_MAX) return refused("own_hosts_full", `at most ${OWN_HOSTS_MAX} own hosts. Remove one first.`);
+  ctx.state.saveOwnHosts([...hosts, r.href]);
+  // the origin is a base URL host: never logged (RM-13)
+  ctx.log.info("bridge.models.own_hosts", { count: ctx.state.ownHosts.length, keysRev: ctx.state.keyStore.keysRev });
+  return { kind: "saved", flash: `Added ${r.href} to Own hosts.${r.warnPublic ? " This is a public address: traffic to it crosses the internet." : ""}` };
+}
+
+/** "role (app)" for every declared role whose binding meets its policy now and would not under `after` */
+function fallBelow(ctx: BridgeContext, t: Table, after: OwnNet): string[] {
+  const out: string[] = [];
+  for (const e of roleRequirements(t)) {
+    const b = resolveBinding(ctx.state.bindings, e.ins, e.role);
+    if (!b || boundKey(b, ctx.state.keyStore.values) === undefined) continue;
+    if (policyMeets(effectivePolicy(b, ownNet(ctx)).policy, e.minPolicy) && !policyMeets(effectivePolicy(b, after).policy, e.minPolicy)) out.push(`${e.role} (${appName(ctx, e.product)})`);
+  }
+  return out;
+}
+
+function removeOwnHost(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome {
+  const origin = form.get("origin") ?? "";
+  if (!ctx.state.ownHosts.includes(origin)) return refused("own_host_unknown", "this address is not in Own hosts.");
+  const rest = ctx.state.ownHosts.filter((h) => h !== origin);
+  if (form.get("confirm") !== "1") {
+    // §15.2: before a removal is confirmed, the page names every binding and app that falls below its minPolicy
+    const below = fallBelow(ctx, t, { infra: ctx.ownInfraOrigins, hosts: rest });
+    const text = below.length ? `These models fall below their app's data policy: ${below.join("; ")}. Those apps stop getting them until you choose another model.` : "No model falls below its app's data policy. Local models at this address count as standard from now on.";
+    return { kind: "confirm", title: `Remove ${origin}?`, text, fields: { action: "host_remove", origin }, button: "Remove the address" };
+  }
+  // local bindings on it count as standard from the next resolve on (effectivePolicy)
+  ctx.state.saveOwnHosts(rest);
+  ctx.log.info("bridge.models.own_hosts", { count: ctx.state.ownHosts.length, keysRev: ctx.state.keyStore.keysRev });
+  return { kind: "saved", flash: `Removed ${origin} from Own hosts.` };
+}
+
+/** The Own hosts section: exact origins the owner states are on their own network (tailnet names and addresses need it). */
+export function renderOwnHosts(ctx: BridgeContext, csrf: string): string {
+  const rows = ctx.state.ownHosts
+    .map((o) => `\n      <li><span class="tb-mono">${esc(o)}</span> <form class="bp-form-del" method="post" action="/keys">${hidden({ csrf, action: "host_remove", origin: o })}<button class="tb-btn" type="submit">${ink("Remove")}</button></form></li>`)
+    .join("");
+  return `
+  <section class="bp-card wide" aria-labelledby="h-own">
+    <h2 id="h-own">Own hosts</h2>
+    <p class="tb-soft">Addresses on your own network that the bridge cannot check, for example a machine on your tailnet. Models at these addresses count as local (owner-listed, not verified): the app resolves the name when it connects. Names need https; plain http is allowed only for a private or tailnet IP address. Link-local and cloud metadata addresses never count.</p>${rows ? `\n    <ul class="tb-list">${rows}\n    </ul>` : ""}
+    <form class="bp-form" method="post" action="/keys">${hidden({ csrf, action: "host_add" })}<label class="tb-label" for="own-new">Address</label><input class="tb-input" id="own-new" name="origin" maxlength="${URL_MAX}" autocomplete="off" inputmode="url" required placeholder="https://gpu.example:8443"><button class="tb-btn primary" type="submit">${ink("Add")}</button></form>
+  </section>`;
 }

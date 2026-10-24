@@ -11,13 +11,13 @@ import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec
 import { EVENT_MCP_METHODS, TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
+import { PERSONA_MAX_CHARS, PERSONA_RESOURCE_URI } from "@opt2-tealbrick/spec/models";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { type CallRouter, RESOLVE_TTL_MS } from "./calls.ts";
 import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EVENT_POLL_LIMIT, isEventCursor, pollLimit } from "./events.ts";
 import { authenticateAgent, connectionState } from "./identity.ts";
 import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
-import { type AgentEntry0163, PERSONA_MAX_CHARS, PERSONA_RESOURCE_URI } from "./spec-0163.ts";
 import { agtRef, grantKey, insRef, type Table } from "./table.ts";
 import { agentPausedOrEmpty, buildToolIndex, grantedProducts, type ToolIndex, type ToolRoute } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, readBody, sendError, sendJson, TokenBucket } from "./util.ts";
@@ -238,7 +238,7 @@ export class McpServer {
   /** BRIDGE §15.6: the owner's persona of this agent; none for a paused (or unknown) agent, an empty or a too long persona */
   private persona(t: Table, agt: AgentId): string | undefined {
     if (agentPausedOrEmpty(t, agt)) return undefined;
-    const p = (t.agents.get(agt) as AgentEntry0163 | undefined)?.persona;
+    const p = t.agents.get(agt)?.persona;
     // §15.6: a persona over the limit (UTF-16 units) is dropped, never cut; BridgeContext.swapTable counts it in `rejected`
     return typeof p === "string" && p.trim() && p.length <= PERSONA_MAX_CHARS ? p : undefined;
   }

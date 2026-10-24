@@ -12,7 +12,7 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { bridgeCaps } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { roleStatuses } from "./model-roles.ts";
-import type { StatusReport0163 } from "./spec-0163.ts";
+import type { StatusReportFollowup } from "./spec-followup.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
@@ -368,7 +368,7 @@ export async function probeViews(ctx: BridgeContext): Promise<boolean> {
 const reportedAtS = new Map<string, number>();
 
 /** BRIDGE §5.6. */
-export function buildStatusReport(ctx: BridgeContext): StatusReport0163 {
+export function buildStatusReport(ctx: BridgeContext): StatusReportFollowup {
   const t = ctx.table;
   const id = ctx.identity;
   if (!id) throw new Error("not enrolled");

@@ -10,11 +10,10 @@ import { request as httpRequest, type IncomingMessage, type ServerResponse } fro
 import { request as httpsRequest } from "node:https";
 import { connect as netConnect, type Socket } from "node:net";
 import { isRefusal } from "@opt2-tealbrick/relay";
-import { LIFETIME_S, type PersonTicketLaunchClaims, TYP } from "@opt2-tealbrick/spec/credentials";
+import { LIFETIME_S, type PersonTicketKeysClaims, type PersonTicketLaunchClaims, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { BridgeContext } from "./context.ts";
-import { applyModelsPost, confirmPage, deleteQuestion, hintsFrom, type RoleHint, renderModels, renderProviderKeys, servesText } from "./models-page.ts";
+import { applyModelsPost, confirmPage, deleteQuestion, hintsFrom, type RoleHint, renderModels, renderOwnHosts, renderProviderKeys, servesText } from "./models-page.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
-import type { PersonTicketKeysClaims0163 } from "./spec-0163.ts";
 import type { AppRuntime } from "./table.ts";
 import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson } from "./util.ts";
 
@@ -249,7 +248,7 @@ export class PersonSurfaces {
       const form = new URLSearchParams(raw.toString("utf8"));
       const ticket = form.get("ticket");
       if (ticket) {
-        const v = this.ctx.api.verifyJws<PersonTicketKeysClaims0163>(ticket, t.issuers, {
+        const v = this.ctx.api.verifyJws<PersonTicketKeysClaims>(ticket, t.issuers, {
           typ: TYP.personTicket,
           aud: this.ctx.bridgeRef,
           iss: this.issuerRefs(),
@@ -280,7 +279,10 @@ export class PersonSurfaces {
       if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, notSaved("the form expired. Go back to the keys and try again."));
       // v0.1.63 (BRIDGE §15.2): provider keys and model bindings
       const outcome = applyModelsPost(this.ctx, t, form);
-      if (outcome?.kind === "confirm") return confirmPage(res, this.ctx, session.csrf, outcome);
+      if (outcome?.kind === "confirm") {
+        if (outcome.saved) this.ctx.emit("keys");
+        return confirmPage(res, this.ctx, session.csrf, outcome);
+      }
       if (outcome?.kind === "refused") {
         this.ctx.log.warn("bridge.models.save_refused", { code: outcome.code });
         return messagePage(res, 400, this.ctx, { title: "The change was not saved", text: `The change was not saved: ${outcome.reason}`, sign: "person", action: linkButton("/keys", "Back to the keys", true), detail: "Nothing was stored. Your other keys and models did not change." });
@@ -376,7 +378,7 @@ export class PersonSurfaces {
     <h2>App keys</h2>
     ${rows ? `<div class="bp-keys">${rows}\n    </div>` : '<p class="tb-soft">No app needs a key.</p>'}
     <p class="tb-hint">This page closes its session after ${LIFETIME_S.keyPageSession / 60} minutes. Open it again from Portal when it expires.</p>
-  </section>${renderProviderKeys(this.ctx, t, session.csrf)}${models}`,
+  </section>${renderProviderKeys(this.ctx, t, session.csrf)}${models}${models ? renderOwnHosts(this.ctx, session.csrf) : ""}`,
     });
   }
 }

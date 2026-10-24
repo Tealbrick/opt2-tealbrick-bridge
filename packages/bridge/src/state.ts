@@ -1,7 +1,7 @@
 /**
  * Persistent bridge state on ONE volume (BRIDGE §1.2): S1 identity, S2 last good config, S3 sealed key
  * store, S4 pairing connections, S5 pending claims, S6 used one-time jtis, S9 standalone overlay, S11 model-role
- * bindings (v0.1.63, BRIDGE §15.1; one `keysRev` with S3).
+ * bindings + the owner's "Own hosts" (v0.1.63, BRIDGE §15.1 / §15.3; one `keysRev` with S3).
  *
  * Integrity (C62 BSD-03): every record except S2 is sealed with TB_KEK (AES-256-GCM, AAD = purpose + file),
  * so a planted or edited file is refused instead of trusted; S2 is a Portal-signed JWS and is verified on
@@ -17,8 +17,8 @@ import { join } from "node:path";
 import type { Kek, ManifestApi } from "@opt2-tealbrick/relay";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, InstanceId, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { DataPolicy, ModelRole } from "@opt2-tealbrick/spec/models";
 import type { Ed25519KeyPair, PinnedKeySet } from "@opt2-tealbrick/spec/sdk";
-import type { DataPolicy, ModelRole } from "./spec-0163.ts";
 
 const isPinned = (v: unknown): v is PinnedKeySet =>
   !!v && typeof v === "object" && Number.isInteger((v as PinnedKeySet).seq) && typeof (v as PinnedKeySet).kss === "string";
@@ -96,6 +96,8 @@ export interface ModelBinding {
 interface ModelsRecord {
   rev: number;
   bindings: ModelBinding[];
+  /** spec follow-up #49 (§15.3): origins the owner states are on their own network; absent in older records = none */
+  ownHosts?: string[];
 }
 
 /** Facts the status report must carry until Portal confirmed them (BSD-11): survive restarts. */
@@ -166,6 +168,8 @@ export class BridgeState {
   keyStore: KeyStore = { keysRev: 0, values: {} };
   /** S11 (v0.1.63): model-role bindings; values stay in S3 */
   bindings: ModelBinding[] = [];
+  /** S11 (spec follow-up #49): the owner's "Own hosts" origins (normalized, model-roles.ts `ownHostOrigin`) */
+  ownHosts: string[] = [];
   standalone: StandaloneOverlay | undefined;
   reports: PendingReports = { revoked: [], pairingJtis: {} };
 
@@ -266,6 +270,7 @@ export class BridgeState {
     this.keyStore = this.readRecord<KeyStore>("keys") ?? { keysRev: 0, values: {} };
     const models = this.readRecord<ModelsRecord>("models");
     this.bindings = models?.bindings ?? [];
+    this.ownHosts = models?.ownHosts ?? [];
     // a crash after the S11 write and before the key store write: the change still gets its revision
     if (models && models.rev > this.keyStore.keysRev) {
       this.keyStore.keysRev = models.rev;
@@ -386,11 +391,21 @@ export class BridgeState {
     else this.bumpKeys();
   }
 
-  /** Replaces S11 (BRIDGE §15.1); bumps `keysRev` once. */
+  /** Replaces the S11 bindings (BRIDGE §15.1); bumps `keysRev` once. */
   saveBindings(next: ModelBinding[]): void {
+    this.saveModels(next, this.ownHosts);
+  }
+
+  /** Replaces the S11 "Own hosts" list (§15.3): it changes which bindings count as `local`, so it bumps `keysRev` once. */
+  saveOwnHosts(next: string[]): void {
+    this.saveModels(this.bindings, next);
+  }
+
+  private saveModels(bindings: ModelBinding[], ownHosts: string[]): void {
     const rev = this.keyStore.keysRev + 1;
-    this.writeRecord("models", { rev, bindings: next } satisfies ModelsRecord);
-    this.bindings = next;
+    this.writeRecord("models", { rev, bindings, ...(ownHosts.length ? { ownHosts } : {}) } satisfies ModelsRecord);
+    this.bindings = bindings;
+    this.ownHosts = ownHosts;
     this.keyStore.keysRev = rev;
     this.saveKeyStore();
   }

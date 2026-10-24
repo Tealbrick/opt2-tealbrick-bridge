@@ -22,14 +22,14 @@
  *    `StatusReport.roles` (model-roles.ts `roleStatuses`) and the persona in instructions + `tb://agent/persona` (mcp.ts).
  *    Core sends `agents[].persona` and `modelRoleRequirements[]` only to a bridge that declares it.
  */
-import type { BridgeCap0163 } from "./spec-0163.ts";
+import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
-export const BRIDGE_CAPS_DECLARED: readonly BridgeCap0163[] = ["owner_rows", "events", "model_roles"];
+export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows", "events", "model_roles"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
  * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap0163[] {
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
   return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
 }

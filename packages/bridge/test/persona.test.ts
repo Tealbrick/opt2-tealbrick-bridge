@@ -6,7 +6,6 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { buildStatusReport } from "../src/portal.ts";
-import type { AgentEntry0163 } from "../src/spec-0163.ts";
 import { AGT, makeWorld, type World, waitFor } from "./support/world.ts";
 
 const PAUSED = "Teal Brick: this agent is paused by the owner. No tools are available until the owner resumes it.";
@@ -22,7 +21,7 @@ describe("RM-7: agent persona in instructions and as a resource", () => {
 
   const setPersona = async (persona: string | undefined, paused = false) => {
     await w.amend((c) => {
-      const a = c.agents.find((x) => x.agt === AGT) as AgentEntry0163;
+      const a = c.agents.find((x) => x.agt === AGT) as (typeof c.agents)[number];
       if (persona === undefined) delete a.persona;
       else a.persona = persona;
       c.pause.agents = (paused ? [AGT] : []) as never;

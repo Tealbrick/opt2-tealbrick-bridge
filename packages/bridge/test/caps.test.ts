@@ -81,8 +81,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
 
   test("the bridge declares exactly owner_rows, events and model_roles, and only values the spec knows", () => {
     assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles"]);
-    // spec 0.1.63 (QA-SPEC42-1) adds `model_roles`; the pinned 0.1.57 list does not have it yet (mirror: src/spec-0163.ts)
-    for (const c of BRIDGE_CAPS_DECLARED) assert.ok([...BRIDGE_CAPS, "model_roles"].includes(c), `${c} is in the spec BRIDGE_CAPS`);
+    for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 
   test("every status report carries the caps: the ones Portal received and a freshly built one", async () => {
@@ -104,8 +103,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
 
   test("the cap strings appear in one place only (caps.ts); no other source file names a capability", () => {
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
-    // spec-0163.ts is the mirror of the spec's cap TYPE (no list of this bridge's caps)
-    for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "caps.ts" && n !== "spec-0163.ts")) {
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "caps.ts")) {
       const text = readFileSync(`${dir}${f}`, "utf8");
       assert.ok(!/["'](owner_rows|events|model_roles)["']/.test(text), `${f} must take the caps from caps.ts`);
     }

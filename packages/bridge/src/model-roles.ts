@@ -1,24 +1,15 @@
 /**
  * Workspace model-role registry (v0.1.63, BRIDGE §15): the declared roles of the signed config, the data policy check
  * (§15.3), resolve for apps (§15.4) and the label-only status rows (§15.5). The bindings live in S11 (state.ts), the key
- * values in S3. The bridge never calls a model or a provider (§1.1): it stores, checks and hands over.
+ * values in S3. The bridge never calls a model or a provider (§1.1), and never resolves a name: it classifies by text,
+ * stores, checks and hands over.
  */
 import { isIPv4, isIPv6 } from "node:net";
+import type { ModelRoleFetchResponse, ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_ROLES, type ModelRole } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
-import {
-  DATA_POLICIES,
-  DATA_POLICY_RANK,
-  type DataPolicy,
-  MODEL_PROVIDERS,
-  MODEL_ROLES,
-  type ModelProvider,
-  type ModelRole,
-  type ModelRoleFetchResponse,
-  type ModelRoleRequirementEntry,
-  type ModelRoleStatus,
-  type WorkspaceConfig0163,
-} from "./spec-0163.ts";
+import { MODEL_PROVIDERS, type ModelProvider, type ModelRoleStatus, NEVER_LOCAL_HOSTNAMES, type PolicyBasis } from "./spec-followup.ts";
 import type { ModelBinding } from "./state.ts";
 import type { Table } from "./table.ts";
 import { BridgeError } from "./util.ts";
@@ -32,76 +23,167 @@ export const providerById = (id: string): ModelProvider | undefined => MODEL_PRO
  * out (fail closed: its role is "not declared" here, never served under a weaker policy).
  */
 export function roleRequirements(t: Table | undefined): ModelRoleRequirementEntry[] {
-  const list = (t?.config as WorkspaceConfig0163 | undefined)?.modelRoleRequirements;
+  const list = t?.config.modelRoleRequirements;
   if (!Array.isArray(list)) return [];
   return list.filter((e) => !!e && isModelRole(e.role) && isDataPolicy(e.minPolicy) && typeof e.ins === "string" && Array.isArray(e.usedBy));
 }
 
-/** Railway private host names */
-const RAILWAY_PRIVATE = /\.railway\.internal$/;
-/** tailnet (MagicDNS) host names */
-const TAILNET = /\.ts\.net$/;
+// ── §15.3 local check (spec follow-up #49, QA-SPEC49-1/-2): one algorithm for base URLs and Own hosts, text only ──
 
-/** IPv4 local ranges (§15.3 step 3): 127/8, 10/8, 172.16/12, 192.168/16 and CGNAT 100.64/10 (tailnet addresses) */
-function localIpv4(host: string): boolean {
-  if (!isIPv4(host)) return false;
-  const [a, b] = host.split(".").map(Number) as [number, number];
-  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-}
+/** step 0, input hygiene: `\`, `@`, whitespace, `?` and `#` are refused (parser differentials) … */
+const UNSAFE_INPUT = /[\\@\s?#]/;
+/** … and control characters U+0000–U+001F and U+007F (NUL and DEL included) anywhere */
+const hasControl = (s: string) => [...s].some((ch) => (ch.codePointAt(0) as number) < 0x20 || ch.codePointAt(0) === 0x7f);
 
-/** IPv6 local forms: `::1`, fc00::/7 (RFC 4193) and an IPv4-mapped address whose IPv4 passes; never `::` or fe80::/10 */
-function localIpv6(host: string): boolean {
-  if (!isIPv6(host)) return false;
-  if (host === "::1") return true;
-  const mapped = /^::ffff:(?:([0-9a-f]{1,4}):([0-9a-f]{1,4})|(\d+\.\d+\.\d+\.\d+))$/.exec(host);
-  if (mapped) {
-    if (mapped[3]) return localIpv4(mapped[3]);
-    const hi = Number.parseInt(mapped[1] as string, 16);
-    const lo = Number.parseInt(mapped[2] as string, 16);
-    return localIpv4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
-  }
-  const first = Number.parseInt(host.split(":")[0] || "0", 16);
-  return (first & 0xfe00) === 0xfc00;
-}
-
-/**
- * §15.3 (QA-SPEC42-5), by text only (no DNS): WHATWG parse, http(s) only, no userinfo; host = `hostname` (lower case,
- * IP literals canonical) minus one trailing dot. Local = `localhost`, a Railway private host, a tailnet name, an origin of
- * TB_OWN_INFRA_ORIGINS, a private / loopback / CGNAT IPv4, `::1`, fc00::/7 or an IPv4-mapped local address. Link-local
- * (cloud metadata), `0.0.0.0`, `::` and every other address or name are not local.
- */
-export function localUrlOk(url: string | null | undefined, ownInfraOrigins: readonly string[]): boolean {
-  if (!url) return false;
-  let u: URL;
+/** steps 0–1: the parsed URL, or undefined (refused). Only http(s). */
+export function parseModelUrl(input: string): URL | undefined {
+  if (!input || UNSAFE_INPUT.test(input) || hasControl(input)) return undefined;
   try {
-    u = new URL(url);
+    const u = new URL(input);
+    return u.protocol === "http:" || u.protocol === "https:" ? u : undefined;
   } catch {
-    return false;
+    return undefined;
   }
-  if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password) return false;
-  const host = u.hostname.replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "");
-  if (host === "localhost" || RAILWAY_PRIVATE.test(host) || TAILNET.test(host) || localIpv4(host) || localIpv6(host)) return true;
-  return ownInfraOrigins.some((o) => {
-    try {
-      return new URL(o.trim()).origin === u.origin;
-    } catch {
-      return false;
-    }
-  });
 }
 
-/** The URL apps use: the binding's own base URL, else the provider default (null when neither). */
-export const baseUrlOf = (b: ModelBinding): string | null => b.baseUrl ?? providerById(b.provider)?.defaultBaseUrl ?? null;
+interface HostInfo {
+  /** lower case, one trailing dot removed, IPv6 brackets stripped, an IPv4-mapped IPv6 turned into dotted IPv4 */
+  host: string;
+  ip4: string | null;
+  ip6: string | null;
+}
+
+/** step 2: Node prints an IPv4-mapped IPv6 in hex (`[::ffff:808:808]`): the last 32 bits become dotted IPv4 BEFORE step 3 */
+function hostInfo(u: URL): HostInfo {
+  let host = u.hostname.toLowerCase().replace(/\.$/, "");
+  if (host.startsWith("[")) host = host.slice(1, -1);
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (mapped) {
+    const n = Number.parseInt(mapped[1] as string, 16) * 65536 + Number.parseInt(mapped[2] as string, 16);
+    host = [24, 16, 8, 0].map((s) => (n >>> s) & 255).join(".");
+  }
+  if (isIPv4(host)) return { host, ip4: host, ip6: null };
+  return { host, ip4: null, ip6: isIPv6(host) ? host : null };
+}
+
+const ip4Num = (ip: string) => ip.split(".").reduce((n, p) => n * 256 + Number(p), 0);
+/** IPv4 in `base/bits` */
+const in4 = (ip: string, base: string, bits: number) => (bits === 0 ? true : Math.floor(ip4Num(ip) / 2 ** (32 - bits)) === Math.floor(ip4Num(base) / 2 ** (32 - bits)));
+const hextet1 = (ip6: string) => Number.parseInt(ip6.split(":")[0] || "0", 16);
+const PRIVATE4: readonly [string, number][] = [
+  ["127.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["172.16.0.0", 12],
+  ["192.168.0.0", 16],
+];
+/** CGNAT 100.64/10 (tailnet addresses): local only when owner-listed; written as numbers (scripts/check-literals.ts) */
+const CGNAT: [string, number] = [[100, 64, 0, 0].join("."), 10];
+
+/** step 3: NEVER_LOCAL addresses and NEVER_LOCAL_HOSTNAMES (link-local, cloud metadata, "this network", unspecified) */
+function neverLocal(h: HostInfo): boolean {
+  if ((NEVER_LOCAL_HOSTNAMES as readonly string[]).includes(h.host)) return true;
+  if (h.ip4) {
+    const [a, b, c, d] = h.ip4.split(".").map(Number) as [number, number, number, number];
+    return (a === 169 && b === 254) || (a === 100 && b === 100 && c === 100 && d === 200) || h.ip4 === "192.0.0.192" || h.ip4 === "168.63.129.16" || a === 0;
+  }
+  if (h.ip6) return h.ip6 === "::" || h.ip6 === "fd00:ec2::254" || (hextet1(h.ip6) & 0xffc0) === 0xfe80;
+  return false;
+}
+
+/** private / loopback addresses of step 4 */
+function privateAddress(h: HostInfo): boolean {
+  if (h.ip4) return PRIVATE4.some(([base, bits]) => in4(h.ip4 as string, base, bits));
+  if (h.ip6) return h.ip6 === "::1" || (hextet1(h.ip6) & 0xfe00) === 0xfc00;
+  return false;
+}
+
+/** an own-network IP literal (Transport rule): private IPv4, CGNAT or fc00::/7 */
+function ownNetIpLiteral(h: HostInfo): boolean {
+  if (h.ip4) return [...PRIVATE4, CGNAT].some(([base, bits]) => in4(h.ip4 as string, base, bits));
+  return !!h.ip6 && (hextet1(h.ip6) & 0xfe00) === 0xfc00;
+}
+
+const originOf = (raw: string): string | undefined => {
+  try {
+    return new URL(raw.trim()).origin;
+  } catch {
+    return undefined;
+  }
+};
+
+/** The two lists step 4 and 5 compare origins with: machine-managed TB_OWN_INFRA_ORIGINS, the owner's Own hosts (S11). */
+export interface OwnNet {
+  infra: readonly string[];
+  hosts: readonly string[];
+}
+export const ownNet = (ctx: Pick<BridgeContext, "ownInfraOrigins" | "state">): OwnNet => ({ infra: ctx.ownInfraOrigins, hosts: ctx.state.ownHosts ?? [] });
+
+export type LocalClass = "verified" | "owner_listed" | "not_local";
 
 /**
- * The policy a stored binding has NOW, re-checked at every resolve and status: `local` only while its URL passes §15.3 (an
- * env change can take that away), `zdr` only while the provider offers it and the owner's attestation is stored; anything
- * else counts as `standard`.
+ * §15.3 for a base URL: refused (`reason`) or the class + the canonical form (`href`, the only form stored and served).
+ * Transport: `http:` only for a verified host or an owner-listed own-network IP literal.
  */
-export function effectivePolicy(b: ModelBinding, ownInfraOrigins: readonly string[]): DataPolicy {
-  if (b.dataPolicy === "local") return localUrlOk(baseUrlOf(b), ownInfraOrigins) ? "local" : "standard";
-  if (b.dataPolicy === "zdr") return providerById(b.provider)?.zdrOffered && b.zdrAttestedAt ? "zdr" : "standard";
-  return "standard";
+export function classifyBase(input: string, own: OwnNet): { cls: LocalClass; href: string } | { refused: string } {
+  const u = parseModelUrl(input);
+  if (!u) return { refused: "the base URL must be an http or https address without a user name, password, spaces, query or fragment." };
+  const h = hostInfo(u);
+  // `.railway.internal` is an exact suffix including the dot, after the trailing dot is gone: `railway.internal`,
+  // `xrailway.internal` and `a.railway.internal.evil.com` are not local
+  const verified = h.host === "localhost" || h.host.endsWith(".railway.internal") || privateAddress(h) || own.infra.some((o) => originOf(o) === u.origin);
+  const listed = own.hosts.some((o) => originOf(o) === u.origin);
+  const cls: LocalClass = neverLocal(h) ? "not_local" : verified ? "verified" : listed ? "owner_listed" : "not_local";
+  if (u.protocol === "http:" && !(cls === "verified" || (cls === "owner_listed" && ownNetIpLiteral(h)))) return { refused: "use an https address; plain http is allowed only on your own network." };
+  return { cls, href: u.href };
+}
+
+/** §15.3 for an Own hosts entry: an exact origin (no path); names need https; NEVER_LOCAL refused; a public IP is a warning. */
+export function classifyOwnHost(input: string): { href: string; origin: string; warnPublic: boolean } | { refused: string } {
+  const u = parseModelUrl(input);
+  if (!u) return { refused: "enter an http or https origin without a user name, password, spaces, query or fragment." };
+  if (u.pathname !== "/") return { refused: "enter the origin only (scheme, host and port), without a path." };
+  const h = hostInfo(u);
+  if (neverLocal(h)) return { refused: "this address is link-local, cloud metadata or unspecified; it never counts as your own network." };
+  if (u.protocol === "http:" && !ownNetIpLiteral(h)) return { refused: "use https for a name or a public address; plain http is allowed only for a private or tailnet IP address." };
+  // a public IPv4 or IPv6 literal is accepted with a warning: traffic to it crosses the internet
+  return { href: u.href, origin: u.origin, warnPublic: (!!h.ip4 || !!h.ip6) && !ownNetIpLiteral(h) };
+}
+
+/** The class of a stored URL now (env and list changes re-classify it); a URL that would now be refused is not local. */
+export function localClass(url: string | null | undefined, own: OwnNet): LocalClass {
+  const r = url ? classifyBase(url, own) : undefined;
+  return r && "cls" in r ? r.cls : "not_local";
+}
+
+/** The canonical URL apps get: the binding's own base URL, else the provider default (null when neither). */
+export function baseUrlOf(b: ModelBinding): string | null {
+  const raw = b.baseUrl ?? providerById(b.provider)?.defaultBaseUrl;
+  if (!raw) return null;
+  return parseModelUrl(raw)?.href ?? raw;
+}
+
+/**
+ * Effective gateway (QA-SPEC49-4): the provider routes to other upstreams, has no default address, or the binding points
+ * somewhere else than its default. Its zdr tick names the host, and a model change needs a new attestation.
+ */
+export function effectiveGateway(p: ModelProvider, baseUrl: string | undefined): boolean {
+  if (p.gateway || !p.defaultBaseUrl) return true;
+  return !!baseUrl && baseUrl !== parseModelUrl(p.defaultBaseUrl)?.href;
+}
+
+/**
+ * The policy a stored binding has NOW and why, re-checked at every resolve and status: `local` while its URL is verified or
+ * owner-listed (an env or list change can take that away), `zdr` while the provider offers it and the owner's attestation
+ * is stored; else `standard`. `zdr` and owner-listed `local` are `owner_attested`.
+ */
+export function effectivePolicy(b: ModelBinding, own: OwnNet): { policy: DataPolicy; basis: PolicyBasis } {
+  if (b.dataPolicy === "local") {
+    const cls = localClass(baseUrlOf(b), own);
+    if (cls === "verified") return { policy: "local", basis: "verified" };
+    if (cls === "owner_listed") return { policy: "local", basis: "owner_attested" };
+  }
+  if (b.dataPolicy === "zdr" && providerById(b.provider)?.zdrOffered && b.zdrAttestedAt) return { policy: "zdr", basis: "owner_attested" };
+  return { policy: "standard", basis: "verified" };
 }
 
 export const policyMeets = (have: DataPolicy, needed: DataPolicy): boolean => DATA_POLICY_RANK[have] >= DATA_POLICY_RANK[needed];
@@ -121,16 +203,25 @@ export function boundKey(b: ModelBinding, values: Readonly<Record<string, string
 }
 
 /**
- * §15.5: one row per `modelRoleRequirements[]` entry, labels only (provider id, model, data policy), never a base URL, key
- * name or key value. `set` = a binding resolves and its key is set; the labels are null when not set.
+ * §15.5: one row per `modelRoleRequirements[]` entry, labels only (provider id, model, data policy, policy basis), never a
+ * base URL, key name or key value. `set` = a binding resolves and its key is set; the labels are null (basis absent) when not.
  */
 export function roleStatuses(ctx: BridgeContext): ModelRoleStatus[] {
   const { bindings, keyStore } = ctx.state;
   return roleRequirements(ctx.table).map((e) => {
     const b = resolveBinding(bindings, e.ins, e.role);
     const set = !!b && boundKey(b, keyStore.values) !== undefined;
-    const have = b && set ? effectivePolicy(b, ctx.ownInfraOrigins) : null;
-    return { role: e.role, ins: e.ins, set, policyOk: !!have && policyMeets(have, e.minPolicy), provider: set && b ? b.provider : null, model: set && b ? b.model : null, dataPolicy: have };
+    const eff = b && set ? effectivePolicy(b, ownNet(ctx)) : null;
+    return {
+      role: e.role,
+      ins: e.ins,
+      set,
+      policyOk: !!eff && policyMeets(eff.policy, e.minPolicy),
+      provider: set && b ? b.provider : null,
+      model: set && b ? b.model : null,
+      dataPolicy: eff?.policy ?? null,
+      ...(eff ? { policyBasis: eff.basis } : {}),
+    };
   });
 }
 
@@ -149,7 +240,7 @@ export function resolveForCaller(ctx: BridgeContext, t: Table, ins: InstanceId, 
   const needed = entries.map((e) => e.minPolicy).reduce((a, b) => (DATA_POLICY_RANK[b] > DATA_POLICY_RANK[a] ? b : a));
   const b = resolveBinding(ctx.state.bindings, ins, role);
   if (!b || !providerById(b.provider)) throw new BridgeError("role_not_set", 404);
-  const have = effectivePolicy(b, ctx.ownInfraOrigins);
+  const have = effectivePolicy(b, ownNet(ctx)).policy;
   if (!policyMeets(have, needed)) throw new BridgeError("role_policy_too_low", 403, "the bound model does not meet the app's data policy", { needed, have });
   const key = boundKey(b, ctx.state.keyStore.values);
   if (key === undefined) throw new BridgeError("role_not_set", 404);

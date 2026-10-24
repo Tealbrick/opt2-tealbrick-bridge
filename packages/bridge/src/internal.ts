@@ -17,7 +17,6 @@ import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { resolveForCaller } from "./model-roles.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
-import { MODEL_ROLES_PATH } from "./spec-0163.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
@@ -36,8 +35,8 @@ export const EVENT_INGEST_MAX_BYTES = 512 * 1024;
 /** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. Event ingest uses the same bucket (§14.1). */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
 
-/** BRIDGE_INTERNAL_PATHS.modelRoles without `{role}` (spec 0.1.63) */
-const MODEL_ROLES_PREFIX = MODEL_ROLES_PATH.slice(0, -"{role}".length);
+/** BRIDGE_INTERNAL_PATHS.modelRoles without `{role}` (spec 0.1.63, BRIDGE §15.4) */
+const MODEL_ROLES_PREFIX = BRIDGE_INTERNAL_PATHS.modelRoles.slice(0, -"{role}".length);
 
 const pauseSignature = (t: Table): string => `${t.pausedWorkspace}|${[...t.pausedAgents].sort().join(",")}|${[...t.pausedInstances].sort().join(",")}`;
 
