@@ -25,6 +25,7 @@ import {
   providerById,
   resolveBinding,
   roleRequirements,
+  servable,
 } from "./model-roles.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type PageApp, pageApp } from "./pages.ts";
 import { MODEL_PROVIDERS, OWN_HOSTS_MAX, type PolicyBasis } from "./spec-followup.ts";
@@ -235,7 +236,7 @@ export function renderModels(ctx: BridgeContext, t: Table, csrf: string, hints: 
       // per declared instance: does what it resolves to work and meet its policy?
       const states = v.entries.map((e) => {
         const b = overrides.find((o) => o.ins === e.ins) ?? def;
-        if (!b || boundKey(b, ctx.state.keyStore.values) === undefined) return "unset";
+        if (!b || !servable(b, ownNet(ctx)) || boundKey(b, ctx.state.keyStore.values) === undefined) return "unset";
         return policyMeets(effectivePolicy(b, ownNet(ctx)).policy, e.minPolicy) ? "ok" : "low";
       });
       const tag = states.includes("low")
@@ -435,13 +436,14 @@ function addOwnHost(ctx: BridgeContext, form: URLSearchParams): ModelsOutcome {
   return { kind: "saved", flash: `Added ${r.href} to Own hosts.${r.warnPublic ? " This is a public address: traffic to it crosses the internet." : ""}` };
 }
 
-/** "role (app)" for every declared role whose binding meets its policy now and would not under `after` */
+/** "role (app)" for every declared role whose binding meets its policy now and would not under `after` (or not be served) */
 function fallBelow(ctx: BridgeContext, t: Table, after: OwnNet): string[] {
   const out: string[] = [];
   for (const e of roleRequirements(t)) {
     const b = resolveBinding(ctx.state.bindings, e.ins, e.role);
     if (!b || boundKey(b, ctx.state.keyStore.values) === undefined) continue;
-    if (policyMeets(effectivePolicy(b, ownNet(ctx)).policy, e.minPolicy) && !policyMeets(effectivePolicy(b, after).policy, e.minPolicy)) out.push(`${e.role} (${appName(ctx, e.product)})`);
+    const ok = (own: OwnNet) => servable(b, own) && policyMeets(effectivePolicy(b, own).policy, e.minPolicy);
+    if (ok(ownNet(ctx)) && !ok(after)) out.push(`${e.role} (${appName(ctx, e.product)})`);
   }
   return out;
 }

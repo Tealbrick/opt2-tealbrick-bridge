@@ -186,6 +186,16 @@ export function effectivePolicy(b: ModelBinding, own: OwnNet): { policy: DataPol
   return { policy: "standard", basis: "verified" };
 }
 
+/**
+ * §15.3 (specs#49 3129040): an `http:` binding whose URL no longer passes the transport rule (its host stopped being local:
+ * env or Own hosts change) is not served at all (resolve `role_not_set`, status `set: false`): a key never goes in clear
+ * text to a host that is not on the owner's network.
+ */
+export function servable(b: ModelBinding, own: OwnNet): boolean {
+  const url = baseUrlOf(b);
+  return !url?.startsWith("http:") || "cls" in classifyBase(url, own);
+}
+
 export const policyMeets = (have: DataPolicy, needed: DataPolicy): boolean => DATA_POLICY_RANK[have] >= DATA_POLICY_RANK[needed];
 
 /** §15.1 resolve order: the instance's override, then the workspace default. An override is used even when it fails the
@@ -210,8 +220,9 @@ export function roleStatuses(ctx: BridgeContext): ModelRoleStatus[] {
   const { bindings, keyStore } = ctx.state;
   return roleRequirements(ctx.table).map((e) => {
     const b = resolveBinding(bindings, e.ins, e.role);
-    const set = !!b && boundKey(b, keyStore.values) !== undefined;
-    const eff = b && set ? effectivePolicy(b, ownNet(ctx)) : null;
+    const own = ownNet(ctx);
+    const set = !!b && servable(b, own) && boundKey(b, keyStore.values) !== undefined;
+    const eff = b && set ? effectivePolicy(b, own) : null;
     return {
       role: e.role,
       ins: e.ins,
@@ -239,8 +250,10 @@ export function resolveForCaller(ctx: BridgeContext, t: Table, ins: InstanceId, 
   }
   const needed = entries.map((e) => e.minPolicy).reduce((a, b) => (DATA_POLICY_RANK[b] > DATA_POLICY_RANK[a] ? b : a));
   const b = resolveBinding(ctx.state.bindings, ins, role);
-  if (!b || !providerById(b.provider)) throw new BridgeError("role_not_set", 404);
-  const have = effectivePolicy(b, ownNet(ctx)).policy;
+  const own = ownNet(ctx);
+  // step 2: no binding, an unknown provider, or an http binding that may no longer be served
+  if (!b || !providerById(b.provider) || !servable(b, own)) throw new BridgeError("role_not_set", 404);
+  const have = effectivePolicy(b, own).policy;
   if (!policyMeets(have, needed)) throw new BridgeError("role_policy_too_low", 403, "the bound model does not meet the app's data policy", { needed, have });
   const key = boundKey(b, ctx.state.keyStore.values);
   if (key === undefined) throw new BridgeError("role_not_set", 404);

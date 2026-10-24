@@ -94,7 +94,7 @@ const LOCAL_CASES: LocalCase[] = (JSON.parse(readFileSync(new URL("./fixtures/lo
 
 describe("BRIDGE §15.3 local check (RM-3, unit; spec follow-up #49)", () => {
   test("every row of the spec fixture local-check.cases.json gives its expected class and canonical form", () => {
-    assert.equal(LOCAL_CASES.length, 106, "all rows of specs#49 5676915");
+    assert.equal(LOCAL_CASES.length, 106, "all rows of specs#49 3129040");
     for (const c of LOCAL_CASES) {
       const label = `${c.kind} ${JSON.stringify(c.input)}`;
       if (c.kind === "own_host") {
@@ -162,9 +162,9 @@ describe("RM-2 resolve order (unit): 9 binding × minPolicy pairs, key after pol
     zdr: { role: "reasoning", provider: "openai", model: "gpt-z", keyName: "K", dataPolicy: "zdr", zdrAttestedAt: at },
     standard: { role: "reasoning", provider: "openai", model: "gpt-s", keyName: "K", dataPolicy: "standard" },
   };
-  const run = (bindings: ModelBinding[], minPolicy: DataPolicy, values: Record<string, string> = { K: "v" }, ins = INS) => {
+  const run = (bindings: ModelBinding[], minPolicy: DataPolicy, values: Record<string, string> = { K: "v" }, ins = INS, ownHosts: string[] = []) => {
     const t = { config: { modelRoleRequirements: [{ role: "reasoning", ins, product: "notes", required: true, minPolicy, usedBy: ["app"] }] }, apps: new Map([[ins, {}]]) } as never;
-    const ctx = { state: { bindings, ownHosts: [], keyStore: { keysRev: 7, values } }, ownInfraOrigins: [] } as never;
+    const ctx = { state: { bindings, ownHosts, keyStore: { keysRev: 7, values } }, ownInfraOrigins: [] } as never;
     try {
       return resolveForCaller(ctx, t, ins as never, "app", "reasoning");
     } catch (e) {
@@ -185,6 +185,14 @@ describe("RM-2 resolve order (unit): 9 binding × minPolicy pairs, key after pol
     const both = [BIND.zdr, { ...BIND.standard, ins: INS2 as never }];
     assert.equal((run(both, "zdr", { K: "v" }, INS2) as { code: string }).code, "role_policy_too_low", "the override is used, never the default");
     assert.equal((run(both, "zdr") as { model: string }).model, "gpt-z", "the other instance keeps the default");
+  });
+  test("an http binding whose host stopped being local is not served (role_not_set), whatever the policy", () => {
+    const listed = `http://${CGNAT_IP}:11434/`;
+    const b: ModelBinding = { role: "reasoning", provider: "ollama", model: "llama3", baseUrl: `${listed}v1`, dataPolicy: "local" };
+    assert.equal((run([b], "standard", {}, INS, [listed]) as { baseUrl: string }).baseUrl, `${listed}v1`, "listed: served");
+    for (const needed of DATA_POLICIES) assert.equal((run([b], needed, {}, INS, []) as { code: string }).code, "role_not_set", `removed from Own hosts, minPolicy ${needed}`);
+    const https = { ...b, baseUrl: `https://${CGNAT_IP}/v1` };
+    assert.equal((run([https], "standard", {}, INS, []) as { dataPolicy: string }).dataPolicy, "standard", "https: still served, as standard");
   });
 });
 
@@ -522,7 +530,8 @@ describe("spec follow-up #49 on the page: Own hosts, gateway attestation, owner-
     assert.equal((await h.post({ action: "host_remove", origin: `${url}/`, confirm: "1" })).status, 303);
     assert.equal(w.bridge.ctx.state.keyStore.keysRev, rev2 + 1);
     assert.equal(stored()?.dataPolicy, "local", "the stored binding is unchanged …");
-    assert.deepEqual([policy(), row()?.policyOk], ["standard", false], "… and counts as standard from the next resolve on");
+    // §15.3 (3129040): its URL is plain http to a host that is no longer listed: not served at all
+    assert.deepEqual([row()?.set, row()?.dataPolicy, row()?.policyOk], [false, null, false], "… and is no longer served (http to a host that stopped being local)");
     // a verified private address, canonical form stored
     assert.equal((await h.post({ action: "bind", role: "utility", provider: "ollama", model: "llama3", baseUrl: "http://LOCALHOST.:11434/v1" })).status, 303);
     assert.equal(stored()?.baseUrl, "http://localhost.:11434/v1");

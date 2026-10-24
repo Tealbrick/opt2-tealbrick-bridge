@@ -1,5 +1,5 @@
 {
-  "source": "Copied from Tealbrick/opt2-tealbrick-specs#49 head 5676915, packages/spec/examples/local-check.cases.json (BRIDGE §15.3, 106 rows). Substitutions so scripts/check-literals.ts passes (no tailnet names or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100, and the spec's sample tailnet label is 'tailnet-example'. The test restores them before use; every row is otherwise unchanged.",
+  "source": "Copied from Tealbrick/opt2-tealbrick-specs#49 head 3129040, packages/spec/examples/local-check.cases.json (BRIDGE §15.3). Placeholders so scripts/check-literals.ts passes (no tailnet DNS suffix or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100. The test restores them before use; every row is otherwise byte-identical to the spec.",
   "description": "Spec follow-up (QA-SPEC49-1/-2/-6): BRIDGE §15.3 local check. kind base = a binding base URL → expect verified | owner_listed | not_local | refused (input hygiene, parse, scheme or transport); kind own_host = an Own hosts entry → accepted | accepted_warn_public | refused. `canonical` = the stored/served form (url.href) when it differs from the input or matters. `ownInfra` = the machine-managed TB_OWN_INFRA_ORIGINS for that row (BRIDGE §5.7). The bridge, the SDK (modelFetch) and tb-exec test against every row (RM-19).",
   "cases": [
     {
@@ -81,7 +81,7 @@
       "input": "https://{cgnat}.{cgnat}.{cgnat}.200/",
       "expect": "not_local",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example",
         "https://{cgnat}.{cgnat}.{cgnat}.200"
@@ -122,27 +122,27 @@
       "input": "http://{cgnat}.101.102.103:11434/v1",
       "expect": "owner_listed",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example"
       ]
     },
     {
       "kind": "base",
-      "input": "https://gpu.tailnet-example.{tsnet}/v1",
+      "input": "https://gpu.tail0000ex.{tsnet}/v1",
       "expect": "owner_listed",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example"
       ]
     },
     {
       "kind": "base",
-      "input": "http://gpu.tailnet-example.{tsnet}/v1",
+      "input": "http://gpu.tail0000ex.{tsnet}/v1",
       "expect": "refused",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example"
       ]
@@ -152,7 +152,7 @@
       "input": "https://other.{tsnet}/v1",
       "expect": "not_local",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example"
       ]
@@ -162,7 +162,7 @@
       "input": "https://ollama.home.example/v1",
       "expect": "owner_listed",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example"
       ]
@@ -172,7 +172,7 @@
       "input": "https://ollama.home.example:8443/v1",
       "expect": "not_local",
       "ownHosts": [
-        "https://gpu.tailnet-example.{tsnet}",
+        "https://gpu.tail0000ex.{tsnet}",
         "http://{cgnat}.101.102.103:11434",
         "https://ollama.home.example"
       ]
@@ -250,7 +250,7 @@
     },
     {
       "kind": "own_host",
-      "input": "https://gpu.tailnet-example.{tsnet}",
+      "input": "https://gpu.tail0000ex.{tsnet}",
       "expect": "accepted"
     },
     {
@@ -260,12 +260,12 @@
     },
     {
       "kind": "own_host",
-      "input": "http://gpu.tailnet-example.{tsnet}",
+      "input": "http://gpu.tail0000ex.{tsnet}",
       "expect": "refused"
     },
     {
       "kind": "own_host",
-      "input": "https://gpu.tailnet-example.{tsnet}/v1",
+      "input": "https://gpu.tail0000ex.{tsnet}/v1",
       "expect": "refused"
     },
     {
