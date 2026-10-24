@@ -17,7 +17,7 @@ import { EVENT_POLL_LIMIT, isEventCursor, pollLimit } from "./events.ts";
 import { authenticateAgent, connectionState } from "./identity.ts";
 import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
 import { agtRef, grantKey, insRef, type Table } from "./table.ts";
-import { agentPausedOrEmpty, buildToolIndex, grantedProducts, type ToolIndex, type ToolRoute } from "./tools.ts";
+import { agentPausedOrEmpty, buildToolIndex, grantedProducts, searchLazy, type ToolIndex, type ToolRoute } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, readBody, sendError, sendJson, TokenBucket } from "./util.ts";
 
 interface Session {
@@ -644,7 +644,21 @@ export class McpServer {
         }
         throw new BridgeError("unknown_tool", 404);
       }
-      return await this.runRoute(t, p, route, args, idem as string | undefined, requestId, signal, sessionId, obo ? { "tb.onBehalfOf": obo as JsonValue } : undefined);
+      // spec 0.1.66 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
+      // call then IS that op's direct call (input = `arguments`; key, gate, hooks, proof, holds and receipts name the op)
+      let target: { route: ToolRoute; args: Json } = { route, args };
+      if (route.kind === "more_call") {
+        // QA-BRIDGE20-3: the inner name gets the direct call's refresh-on-miss (C283 A1: an owner may have just admitted it)
+        let more: ToolRoute = route;
+        const inner = moreCallName(route.app, args);
+        if (!idx.routes.has(inner) && (await this.refreshOnMiss(t, p.agt, inner))) {
+          idx = await this.index(this.ctx.table ?? t, p.agt);
+          const again = idx.routes.get(name);
+          if (again?.kind === "more_call") more = again;
+        }
+        target = resolveMoreCall(idx, more.app, args);
+      }
+      return await this.runRoute(t, p, target.route, target.args, idem as string | undefined, requestId, signal, sessionId, obo ? { "tb.onBehalfOf": obo as JsonValue } : undefined);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
       const message = e instanceof BridgeError ? e.message : "internal error";
@@ -669,6 +683,14 @@ export class McpServer {
       if (text === undefined) throw new BridgeError("unknown_tool", 404, "unknown skill");
       return { content: [{ type: "text", text }], structuredContent: { skillId, text } };
     }
+    if (route.kind === "more_search") {
+      // spec 0.1.66 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
+      const query = isRecord(args) && typeof args.query === "string" ? args.query : "";
+      if (!query || query.length > 500) throw new BridgeError("input_invalid", 400, "query required (1–500 chars)");
+      const limit = isRecord(args) && typeof args.limit === "number" ? Math.min(Math.max(1, Math.floor(args.limit)), 50) : 10;
+      return toolOk(searchLazy(route.lazy, query, limit) as unknown as Json);
+    }
+    if (route.kind === "more_call") throw new BridgeError("unknown_tool", 404); // resolved in callTool; never nested
     if (route.kind === "dynamic_search") {
       if (agentPausedOrEmpty(t, p.agt)) throw new BridgeError("paused", 403);
       const query = isRecord(args) && typeof args.query === "string" ? args.query : "";
@@ -708,6 +730,25 @@ export class McpServer {
     }
     return toolOk(result.output as Json);
   }
+}
+
+/**
+ * spec 0.1.66 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
+ * route of the SAME app in this agent's index qualifies; anything else (unknown, not visible to this agent, another product,
+ * a standard op, a dynamic op or entry, a `tb_*` tool) is `unknown_tool`, the answer for a name that does not exist.
+ */
+/** the tool name a `tb_more_call` input names (`<product>__<op>` or the bare op id of this app) */
+export function moreCallName(app: ToolRoute["app"], args: Json): string {
+  const tool = isRecord(args) && typeof args.tool === "string" ? args.tool : "";
+  if (!tool) throw new BridgeError("input_invalid", 400, "tool required");
+  if (isRecord(args) && args.arguments !== undefined && !isRecord(args.arguments)) throw new BridgeError("input_invalid", 400, "arguments must be an object");
+  return tool.includes(TOOL_NAME_RULE.separator) ? tool : `${app.entry.product}${TOOL_NAME_RULE.separator}${tool}`;
+}
+
+export function resolveMoreCall(idx: ToolIndex, app: ToolRoute["app"], args: Json): { route: ToolRoute & { kind: "op" }; args: Json } {
+  const route = idx.routes.get(moreCallName(app, args));
+  if (route?.kind !== "op" || route.app !== app || route.op.standard || route.op.dynamic) throw new BridgeError("unknown_tool", 404);
+  return { route, args: (isRecord(args) && isRecord(args.arguments) ? args.arguments : {}) as Json };
 }
 
 class RpcError extends Error {
