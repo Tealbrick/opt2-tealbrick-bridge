@@ -17,15 +17,19 @@
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  *    Reported only while the event log is available ({@link bridgeCaps}).
+ *  - `person_ops` = the person-op relay, ALL of BRIDGE §15 (spec 0.1.64, C326): the long-poll of queued person ops from Core,
+ *    one forward per op to the app's `POST /tb/v1/person-op` and the result post (person-ops.ts `runPersonOpRelay`).
+ *    Never in standalone mode: the relay does not run there (no K14 issuer), so re-minted slices leave it out.
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
-export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows", "events"];
+export const BRIDGE_CAPS_DECLARED: readonly BridgeCap[] = ["owner_rows", "events", "person_ops"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
- * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
+ * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes), without `person_ops` once
+ * the table is standalone (the relay has stopped). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
-  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined; table?: { standalone: boolean } | undefined }): BridgeCap[] {
+  return BRIDGE_CAPS_DECLARED.filter((c) => (c !== "events" || ctx.events?.available === true) && (c !== "person_ops" || ctx.table?.standalone !== true));
 }

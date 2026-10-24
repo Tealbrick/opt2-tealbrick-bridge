@@ -18,6 +18,7 @@ import { type McpLimits, McpServer } from "./mcp.ts";
 import { OAuthServer } from "./oauth.ts";
 import { messagePage, STATIC_PREFIX, sendStatic, staticFile } from "./pages.ts";
 import { PersonSurfaces } from "./person.ts";
+import { runPersonOpRelay } from "./person-ops.ts";
 import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
@@ -275,6 +276,8 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const status = startStatusLoop(ctx, abort.signal);
   for (const ev of ["claim", "keys", "health", "connection-created", "connection-revoked"]) ctx.on(ev, () => status.poke());
   void runConfigLoop(ctx, abort.signal);
+  // BRIDGE §15 (spec 0.1.64): the person-op long-poll runs next to the config pull; it ends in standalone mode and on stop
+  void runPersonOpRelay(ctx, abort.signal);
   startManifestRetry(ctx, abort.signal);
   startStandaloneLoop(ctx, abort.signal);
 

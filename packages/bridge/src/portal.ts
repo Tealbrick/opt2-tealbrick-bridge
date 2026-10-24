@@ -94,7 +94,7 @@ export function statementKeys(kss: string): PortalKeyEntry[] {
   return claims.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
 }
 
-async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAndQuery: string, body?: unknown, timeoutMs = 30_000, abort?: AbortSignal): Promise<Response> {
+export async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAndQuery: string, body?: unknown, timeoutMs = 30_000, abort?: AbortSignal): Promise<Response> {
   const id = ctx.identity;
   if (!id) throw new BridgeError("not_enrolled", 500);
   const raw = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
