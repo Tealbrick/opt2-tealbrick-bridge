@@ -1,6 +1,7 @@
 /**
  * Person-facing surfaces of the bridge (BRIDGE §9): app launch + UI proxy (/a/<product>/…),
- * declared public routes (/p/<product>/…) and the key-entry page (/keys). Not paused by design
+ * declared public routes (/p/<product>/…) and the "Keys and models" page (/keys; v0.1.63 adds provider keys and model
+ * roles, models-page.ts). Not paused by design
  * (CREDENTIALS §13) and served with a config older than 12 h so the owner can act.
  */
 
@@ -11,6 +12,7 @@ import { connect as netConnect, type Socket } from "node:net";
 import { isRefusal } from "@opt2-tealbrick/relay";
 import { LIFETIME_S, type PersonTicketKeysClaims, type PersonTicketLaunchClaims, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { BridgeContext } from "./context.ts";
+import { applyModelsPost, confirmPage, deleteQuestion, hintsFrom, type RoleHint, renderModels, renderOwnHosts, renderProviderKeys, servesText } from "./models-page.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
 import type { AppRuntime } from "./table.ts";
 import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson } from "./util.ts";
@@ -27,6 +29,10 @@ interface KeySession {
   req: string[];
   /** one-time success notice for the next page view: the saved key's NAME (never a value), server side only */
   saved?: string;
+  /** v0.1.63: one-time notice of a provider key or model change (plain text, server side only) */
+  flash?: string;
+  /** v0.1.63: the ticket's `roles[]` hints (display only) */
+  hints: RoleHint[];
 }
 
 export class PersonSurfaces {
@@ -254,7 +260,7 @@ export class PersonSurfaces {
           return refuse("ticket_invalid", null, 401, { title: "Link expired", text: "This link has expired or was used. Open it again from Portal.", sign: "open", action: portalButton(this.ctx) });
         }
         const id = randomBytes(32).toString("base64url");
-        const fresh: KeySession = { csrf: randomBytes(24).toString("base64url"), exp: nowS() + LIFETIME_S.keyPageSession, req: v.claims.req ?? [] };
+        const fresh: KeySession = { csrf: randomBytes(24).toString("base64url"), exp: nowS() + LIFETIME_S.keyPageSession, req: v.claims.req ?? [], hints: hintsFrom(v.claims) };
         this.keySessions.set(id, fresh);
         // Render the page in THIS response (no redirect): the ticket arrives by a cross-site form POST from the
         // Portal, and a browser does not send a SameSite=Strict cookie on the redirected GET of that navigation.
@@ -271,9 +277,29 @@ export class PersonSurfaces {
           detail: `Key pages close after ${LIFETIME_S.keyPageSession / 60} minutes so a key can never be entered on a page left open.`,
         });
       if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, notSaved("the form expired. Go back to the keys and try again."));
+      // v0.1.63 (BRIDGE §15.2): provider keys and model bindings
+      const outcome = applyModelsPost(this.ctx, t, form);
+      if (outcome?.kind === "confirm") {
+        if (outcome.saved) this.ctx.emit("keys");
+        return confirmPage(res, this.ctx, session.csrf, outcome);
+      }
+      if (outcome?.kind === "refused") {
+        this.ctx.log.warn("bridge.models.save_refused", { code: outcome.code });
+        return messagePage(res, 400, this.ctx, { title: "The change was not saved", text: `The change was not saved: ${outcome.reason}`, sign: "person", action: linkButton("/keys", "Back to the keys", true), detail: "Nothing was stored. Your other keys and models did not change." });
+      }
+      if (outcome) {
+        session.flash = outcome.flash;
+        this.ctx.emit("keys");
+        res.writeHead(303, { location: "/keys", "cache-control": "no-store" }).end();
+        return;
+      }
       const allowed = t.config.keyRequirements.some((k) => k.source === "account_default" && k.name === name);
       if (!allowed) return refuse("unknown_key", name, 400, notSaved("no app requests this key."));
       if (form.get("action") === "delete") {
+        // BRIDGE §15.2: a key that serves models is deleted only after the owner confirmed it
+        const label = t.config.keyRequirements.find((k) => k.name === name)?.label ?? name;
+        const q = form.get("confirm") === "1" ? undefined : deleteQuestion(this.ctx, t, name, label, { name, action: "delete" });
+        if (q?.kind === "confirm") return confirmPage(res, this.ctx, session.csrf, q);
         this.ctx.state.setKey(name, null);
       } else {
         // a pasted key often carries a trailing newline or spaces: only the surrounding whitespace is removed
@@ -324,30 +350,35 @@ export class PersonSurfaces {
           })
           .join("");
         const tag = set ? `<span class="tb-tag live">${ink("Set")}</span>` : e.required ? `<span class="tb-tag needs-you">${ink("Not set")}</span>` : `<span class="tb-tag idle">${ink("Not set")}</span>`;
+        const serves = servesText(this.ctx, t, n);
         return `
   <section class="bp-key" aria-labelledby="k-${id}">
     <div class="bp-key-head"><h2 id="k-${id}">${esc(e.label)}${e.required ? "" : " <small>(optional)</small>"}</h2>${tag}</div>
-    <div class="bp-used"><span class="tb-mono">${id}</span><span>used by</span>${chips}${session.req.includes(n) ? `<span class="tb-tag busy">${ink("requested now")}</span>` : ""}</div>
+    <div class="bp-used"><span class="tb-mono">${id}</span><span>used by</span>${chips}${session.req.includes(n) ? `<span class="tb-tag busy">${ink("requested now")}</span>` : ""}</div>${serves ? `\n    <div class="bp-used"><span>Serves:</span><span>${esc(serves)}</span></div>` : ""}
     <div class="bp-form"><form class="bp-form-del" method="post" action="/keys">${hidden(n)}<label class="tb-sr" for="v-${id}">${esc(e.label)}</label><input class="tb-input" id="v-${id}" name="value" type="password" autocomplete="off" required placeholder="${set ? "Replace value" : "Enter value"}"><button class="tb-btn${set ? "" : " primary"}" type="submit">${ink(set ? "Replace" : "Save")}</button></form>${set ? `<form class="bp-form-del" method="post" action="/keys">${hidden(n)}<input type="hidden" name="action" value="delete"><button class="tb-btn danger" type="submit">${ink("Delete")}</button></form>` : ""}</div>
   </section>`;
       })
       .join("");
     // the one-time success notice: the key's label from the table (the name the form sent was checked against it)
     const savedLabel = session.saved ? byName.get(session.saved)?.label : undefined;
+    const notice = savedLabel ? `Saved ${savedLabel}.` : session.flash;
     delete session.saved;
-    const flash = savedLabel ? `\n    <div class="tb-notice live" role="status"><span><strong>Saved ${esc(savedLabel)}.</strong> Apps that use it pick it up within a minute.</span></div>` : "";
+    delete session.flash;
+    const flash = notice ? `\n    <div class="tb-notice live" role="status"><span><strong>${esc(notice)}</strong> Apps that use it pick it up within a minute.</span></div>` : "";
+    const models = renderModels(this.ctx, t, session.csrf, session.hints, apps);
     htmlPage(res, 200, {
-      title: "Workspace default keys",
+      title: "Keys and models",
       workspace: t.config.workspace.name,
       apps: [...apps.values()],
       headers,
       main: `
   <section class="bp-card wide" aria-labelledby="h">
-    <h1 id="h">Workspace default keys</h1>
+    <h1 id="h">Keys and models</h1>
     <p class="tb-soft">Keys are stored in your workspace only. Tealbrick Portal never sees them, and values are never shown again.</p>${flash}
+    <h2>App keys</h2>
     ${rows ? `<div class="bp-keys">${rows}\n    </div>` : '<p class="tb-soft">No app needs a key.</p>'}
     <p class="tb-hint">This page closes its session after ${LIFETIME_S.keyPageSession / 60} minutes. Open it again from Portal when it expires.</p>
-  </section>`,
+  </section>${renderProviderKeys(this.ctx, t, session.csrf)}${models}${models ? renderOwnHosts(this.ctx, session.csrf) : ""}`,
     });
   }
 }

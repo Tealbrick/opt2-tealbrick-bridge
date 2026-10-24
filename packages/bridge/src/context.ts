@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { PERSONA_MAX_CHARS } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
@@ -21,6 +22,8 @@ import { nowS } from "./util.ts";
 export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 /** F57a / L21: Retry-After (seconds) on tool and companion calls refused while the bridge drains (nothing ran) */
 export const DRAIN_RETRY_AFTER_S = 2;
+/** spec 0.1.63 (bridge.ts `rejected` doc, BRIDGE §15.6): kind `config` + this code = a persona over PERSONA_MAX_CHARS, dropped */
+export const PERSONA_TOO_LONG = "persona_too_long";
 
 /**
  * BSD-08 (CREDENTIALS §9.5): the root channel this build pins. A build constant, never env (Portal sets env at
@@ -189,6 +192,10 @@ export class BridgeContext extends EventEmitter {
     this.table = next;
     // C268c: a config change of an app's digest, version or update candidate drops its hook proof capabilities, before any call uses the new table
     this.proofCaps.onTable(next, prev);
+    // v0.1.63 (BRIDGE §15.6): a persona over PERSONA_MAX_CHARS is dropped for that agent (mcp.ts) and counted once per table
+    for (const a of next.agents.values()) {
+      if (typeof a.persona === "string" && a.persona.length > PERSONA_MAX_CHARS) this.reject({ kind: "config", code: PERSONA_TOO_LONG, detail: `agent ${a.agt}: ${a.persona.length} > ${PERSONA_MAX_CHARS}` });
+    }
     this.emit("table", next, prev);
   }
 }

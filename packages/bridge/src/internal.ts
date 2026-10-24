@@ -1,6 +1,6 @@
 /**
  * Internal listener (private network only, BRIDGE §3.2): app claim, status push + slice/keys
- * long-poll, key fetch, app→app companion call, metrics. Callers prove themselves with instance
+ * long-poll, key fetch, model-role resolve (v0.1.63), app→app companion call, metrics. Callers prove themselves with instance
  * assertions (`TB-Assert`, typ tb-instance-assert+jwt, bound to method, path and body).
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -14,6 +14,7 @@ import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
+import { resolveForCaller } from "./model-roles.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
@@ -33,6 +34,9 @@ export const EVENT_INGEST_MAX_BYTES = 512 * 1024;
 
 /** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. Event ingest uses the same bucket (§14.1). */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
+
+/** BRIDGE_INTERNAL_PATHS.modelRoles without `{role}` (spec 0.1.63, BRIDGE §15.4) */
+const MODEL_ROLES_PREFIX = BRIDGE_INTERNAL_PATHS.modelRoles.slice(0, -"{role}".length);
 
 const pauseSignature = (t: Table): string => `${t.pausedWorkspace}|${[...t.pausedAgents].sort().join(",")}|${[...t.pausedInstances].sort().join(",")}`;
 
@@ -122,6 +126,7 @@ export class InternalApi {
       if (req.method === "POST" && url.pathname === "/tb/v1/claim") return await this.claim(req, res);
       if (req.method === "POST" && url.pathname === "/tb/v1/status") return await this.status(req, res, url);
       if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, decodeURIComponent(url.pathname.slice(12)));
+      if (req.method === "GET" && url.pathname.startsWith(MODEL_ROLES_PREFIX)) return this.modelRoleFetch(req, res, decodeURIComponent(url.pathname.slice(MODEL_ROLES_PREFIX.length)));
       if (req.method === "POST" && url.pathname === "/tb/v1/call") {
         // F57a: no new companion call while draining (retryable; nothing ran)
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
@@ -313,6 +318,16 @@ export class InternalApi {
     if (value === undefined) throw new BridgeError("key_not_set", 404);
     const out: KeyFetchResponse = { name, value, keysRev: this.ctx.state.keyStore.keysRev };
     sendJson(res, 200, out);
+  }
+
+  // ── §15.4 model-role resolve (v0.1.63): the binding is never logged ──
+  private modelRoleFetch(req: IncomingMessage, res: ServerResponse, role: string): void {
+    const caller = this.assertCaller(req, Buffer.alloc(0));
+    const t = this.ctx.table;
+    if (!t) throw new BridgeError("app_unavailable", 503);
+    if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
+    if (!t.apps.has(caller.ins)) throw new BridgeError("app_unavailable", 503, "no verified config entry for this instance yet; retry");
+    sendJson(res, 200, resolveForCaller(this.ctx, t, caller.ins, caller.svc ?? "app", role));
   }
 
   // ── §8.3 companion (app→app) ──
