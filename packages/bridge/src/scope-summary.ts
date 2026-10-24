@@ -24,12 +24,19 @@ export const LIST_MAX_AGE_MS = 30_000;
 export const MISS_MIN_AGE_MS = 5_000;
 
 const SNAKE_RE = /^[a-z][a-z0-9_]{0,39}$/;
-const SOURCE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * QA (bridge#26): the app's OWN instance id only: a Tealbrick-style `<prefix>_<ULID>` or a lower-case slug. Provider-shaped ids
+ * (Stripe `cus_bYze8b07…`, Slack `C04ACME…`, a Drive id, an email, a phone number) do not match and the item is dropped.
+ */
+export const SOURCE_ID_RE = /^(?:[a-z]{2,4}_[0-9A-HJKMNP-TV-Z]{26}|[a-z][a-z0-9_-]{0,63})$/;
+/** At most `max` code points (never half of a surrogate pair: Postgres jsonb refuses a lone surrogate). */
+export const clampCodePoints = (s: string, max: number): string => Array.from(s).slice(0, max).join("");
 
 /**
- * `ScopeSummaryResult.sources` → the items the status report forwards (BRIDGE §5.6): the first SCOPE_SOURCES_MAX, each well
- * formed (snake type and access, app instance id), labels without control or format characters (\p{Cc}, \p{Cf}) and at most
- * SCOPE_SOURCE_LABEL_MAX; a malformed item is dropped, never repaired. Not an array (an SDK before 0.1.65) → undefined.
+ * `ScopeSummaryResult.sources` → the items the status report forwards (BRIDGE §5.6): of the FIRST SCOPE_SOURCES_MAX items
+ * (then malformed ones are dropped, so fewer may remain), each well formed (snake type and access, the app's own instance id:
+ * SOURCE_ID_RE), its label without control or format characters (\p{Cc}, \p{Cf}) and at most SCOPE_SOURCE_LABEL_MAX code
+ * points; never repaired. Not an array (an SDK before 0.1.65) → undefined.
  */
 export function scopeSourceItems(v: unknown): ScopeSourceItem[] | undefined {
   if (!Array.isArray(v)) return undefined;
@@ -39,7 +46,7 @@ export function scopeSourceItems(v: unknown): ScopeSourceItem[] | undefined {
     const { type, id, label, access } = it as Record<string, unknown>;
     if (typeof type !== "string" || !SNAKE_RE.test(type) || typeof access !== "string" || !SNAKE_RE.test(access)) continue;
     if (typeof id !== "string" || !SOURCE_ID_RE.test(id) || typeof label !== "string") continue;
-    const clean = label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, SCOPE_SOURCE_LABEL_MAX);
+    const clean = clampCodePoints(label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim(), SCOPE_SOURCE_LABEL_MAX);
     if (clean) out.push({ type: type as ScopeSourceItem["type"], id, label: clean, access: access as ScopeSourceItem["access"] });
   }
   return out;
@@ -108,7 +115,7 @@ async function doRefresh(ctx: BridgeContext, router: CallRouter, ins: InstanceId
     for (const s of Array.isArray(list) ? list : []) {
       if (typeof s?.agent !== "string" || typeof s.label !== "string") continue;
       const sources = scopeSourceItems(s.sources);
-      ctx.scopeSummaries.set(`${s.agent}|${ins}`, { agt: s.agent, ins, label: s.label.slice(0, 80), ...(sources ? { sources } : {}) });
+      ctx.scopeSummaries.set(`${s.agent}|${ins}`, { agt: s.agent, ins, label: clampCodePoints(s.label, 80), ...(sources ? { sources } : {}) });
       // C283 A1: display marks only; a missing or malformed member = none
       const admitted = admittedOpIds(s.admittedOps);
       if (admitted.size > 0) ctx.admittedOps.set(`${s.agent}|${ins}`, admitted);

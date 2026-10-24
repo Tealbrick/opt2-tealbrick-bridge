@@ -2,9 +2,11 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
-## Unreleased — scope sources in the status report (C331 D8; spec 0.1.65)
+## Unreleased — scope sources in the status report (C331 D8; spec 0.1.65); the report stays under Core's ack cap
 
-- `scope_summary` answers may carry `sources` (the agent's scope instances: type, the app's instance id, label, access). The bridge keeps the first 20 well-formed items (snake type and access, id `[A-Za-z0-9_-]{1,64}`), strips `\p{Cc}`/`\p{Cf}` from labels and clamps them to 60, drops malformed items, and forwards them in `StatusReport.scopeSummaries[].sources`. An answer without `sources` (SDK before 0.1.65) forwards none. A change of sources alone pokes Portal like a label change. Display only.
+- `scope_summary` answers may carry `sources` (the agent's scope instances: type, the app's instance id, label, access). Of the FIRST 20 items, the bridge keeps the well-formed ones (snake type and access; the id is the app's own: `<prefix>_<ULID>` or a lower-case slug, so a provider id such as a Stripe or Slack id is dropped), removes `\p{Cc}`/`\p{Cf}` from labels and cuts them at 60 code points (never half a surrogate pair), and forwards them in `StatusReport.scopeSummaries[].sources`. Malformed items are dropped, never repaired, so fewer than 20 may remain. An answer without `sources` (SDK before 0.1.65) forwards none. A change of sources alone pokes Portal like a label change. Display only. Scope summary labels are cut at 80 code points the same way.
+- **The status report stays under 240 KiB** (Core reads 256 KiB; QA: one app could push 443 KB). Over that, the bridge cuts what apps can grow, cheapest first: all `sources`, then omitted tools and scope summaries to 50 per app, then those lists whole. Each cut adds one `rejected` marker per app (`kind: bridge_op`, code `report_truncated_sources` | `report_truncated_tools` | `report_truncated_scopes`, count = items dropped).
+- Spec pin 0.1.57 → 0.1.65.
 
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 

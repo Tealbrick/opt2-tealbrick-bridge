@@ -136,7 +136,7 @@ packages:
     version: 0.1.57
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz':
-    resolution: {tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz}
+    resolution: {integrity: sha512-oMtwFmCBZ76rN1OqWvWrZBFImHDkiHINWP1/dXIb/1jlUqfLK7LI0SkFCH8oJnkfzk6D148NzJX3qOAkmnQgnA==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz}
     version: 0.1.65
 
   '@types/node@24.19.2':
