@@ -5,7 +5,7 @@
  *
  * The pinned validator (manifest 0.1.30, spec 0.1.57) refuses `listing: "lazy"` (`schema_invalid`), so the end-to-end tests
  * run in the test-double world; the real-crypto world runs them as soon as the pinned validator accepts the value (pin bump
- * to spec >= 0.1.66), and says so while it does not. Mirrors conformance B19.*.
+ * to spec >= 0.1.66), and says so while it does not. Mirrors conformance B29.*.
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -74,7 +74,7 @@ for (const real of [false, true]) {
       await w.close();
     });
 
-    test("B19.lazy_hidden: tools/list has the hot op and the pair, not the lazy ops; the pair's annotations are the widest lazy effect", async () => {
+    test("B29.lazy_hidden: tools/list has the hot op and the pair, not the lazy ops; the pair's annotations are the widest lazy effect", async () => {
       const tools = await list(w, await session(w));
       const names = tools.map((t) => t.name);
       assert.ok(names.includes("notes__notes_list"), "hot op listed");
@@ -90,7 +90,7 @@ for (const real of [false, true]) {
       for (const t of tools) assert.ok(!("op" in t) && !("effect" in t), "no internal fields in tools/list");
     });
 
-    test("B19.lazy_search: '*' returns the visible lazy ops with schema and effect; a word ranks its op first; the app gets no call", async () => {
+    test("B29.lazy_search: '*' returns the visible lazy ops with schema and effect; a word ranks its op first; the app gets no call", async () => {
       const s = await session(w);
       const ops = w.appLog.ops.length;
       const seen = w.bridgeOps.seen.length;
@@ -115,7 +115,7 @@ for (const real of [false, true]) {
       assert.equal(w.bridgeOps.seen.length, seen, "nor a bridge op");
     });
 
-    test("B19.lazy_grant: a lazy op the grant does not make visible is not callable (via the pair or by name); the app sees nothing", async () => {
+    test("B29.lazy_grant: a lazy op the grant does not make visible is not callable (via the pair or by name); the app sees nothing", async () => {
       const s = await session(w);
       const ops = w.appLog.ops.length;
       for (const [name, args] of [[CALL, { tool: "notes__notes_delete", arguments: {} }], [CALL, { tool: "notes_delete", arguments: {} }], ["notes__notes_delete", {}]] as const) {
@@ -126,7 +126,7 @@ for (const real of [false, true]) {
       assert.equal(w.appLog.ops.length, ops);
     });
 
-    test("B19.lazy_call_same_route: through tb_more_call = the direct call (proof op + input digest, hooks name the op, same derived key, held handle)", async () => {
+    test("B29.lazy_call_same_route: through tb_more_call = the direct call (proof op + input digest, hooks name the op, same derived key, held handle)", async () => {
       const s = await session(w);
       const start = w.appLog.ops.length;
       const hooks = w.appLog.hooks.length;
@@ -161,7 +161,7 @@ for (const real of [false, true]) {
       assert.equal((await call(w, s, CALL, { tool: "notes_create", arguments: "x" })).structuredContent?.error?.code, "input_invalid");
     });
 
-    test("B19.lazy_unknown: unknown op, another product, a standard op, the pair itself → unknown_tool", async () => {
+    test("B29.lazy_unknown: unknown op, another product, a standard op, the pair itself → unknown_tool", async () => {
       const s = await session(w);
       const ops = w.appLog.ops.length;
       for (const tool of ["notes__nope", "nope", "guard__guard_status", "notes__tb_hold_status", "tb_hold_status", SEARCH, CALL, "notes__tb_skills"]) {
@@ -171,7 +171,7 @@ for (const real of [false, true]) {
       assert.equal(w.appLog.ops.length, ops);
     });
 
-    test("B19.lazy_hot_and_direct: a listed op via tb_more_call is allowed; a lazy op by its own name is allowed", async () => {
+    test("B29.lazy_hot_and_direct: a listed op via tb_more_call is allowed; a lazy op by its own name is allowed", async () => {
       const s = await session(w);
       const hot = await call(w, s, CALL, { tool: "notes__notes_list", arguments: { q: "z" } });
       assert.equal(hot.isError, undefined);
