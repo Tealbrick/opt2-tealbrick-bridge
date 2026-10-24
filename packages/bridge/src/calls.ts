@@ -48,7 +48,7 @@ export type CallOutcome = OpResult<JsonValue>;
 
 export const RESOLVE_TTL_MS = 5 * 60_000;
 /** spec 0.1.68 (BRIDGE v0.1.68, cap `hook_tool`): a dynamic resolution's canonical tool name. */
-export const DYNAMIC_TOOL_RE = /^[a-z][a-z0-9_]{1,47}$/;
+export const DYNAMIC_TOOL_RE = /^[a-z][a-z0-9_]{1,62}$/; // spec 0.1.68: catalog names (<= 48) and resolved variants such as `<tool>__first_contact`
 const APP_TIMEOUT_MS = 30_000;
 /** F57a: message of a call cut off at the drain bound (it may have run: the caller checks before retrying) */
 const CUT_OFF = "the bridge restarted while this call ran; its outcome is unknown, check before retrying";

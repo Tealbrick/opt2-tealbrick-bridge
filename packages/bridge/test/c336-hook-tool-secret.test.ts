@@ -147,7 +147,7 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
 
   test("B29: a resolution that names another tool, or a malformed one, is refused dynamic_resolve_failed before any hook or forward", async () => {
     // [requested, the app's answer]: a different canonical name, then names that equal the request but are not canonical
-    const long = `g${"x".repeat(48)}`;
+    const long = `g${"x".repeat(63)}`; // 64 chars: over the 63 of spec 0.1.68 (catalog names <= 48, resolved variants such as <tool>__first_contact <= 63)
     for (const [requested, answer] of [["gb_m1", "gb_other"], ["Gb_Upper", "Gb_Upper"], ["gb-dash", "gb-dash"], ["g", "g"], [long, long]] as const) {
       resolveAs = () => answer;
       const from = w.appLog.hooks.length;

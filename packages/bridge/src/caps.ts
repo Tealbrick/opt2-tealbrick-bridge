@@ -20,7 +20,7 @@
  *  - `hook_tool` (spec 0.1.68, bridge 0.2.8, BRIDGE v0.1.68) = on all three dynamic call paths (a listed entry, `<op>_call`,
  *    the relay's dynamic call; all through calls.ts `route`) the hook `call.target.tool` is the resolution's canonical tool
  *    with its crud/effect/holdFamily, absent for static ops; a resolution whose tool differs from the requested name or is not
- *    `^[a-z][a-z0-9_]{1,47}$` is refused `dynamic_resolve_failed` (calls.ts `resolve`, `effectiveOp`).
+ *    `^[a-z][a-z0-9_]{1,62}$` is refused `dynamic_resolve_failed` (calls.ts `resolve`, `effectiveOp`).
  *  - `secret_output` (spec 0.1.68, bridge 0.2.8, MANIFEST M-OP-12) = a `secretOutput` op is never listed for agents (tools.ts
  *    `visibleOps`), an agent call is refused `secret_output_app_only` (calls.ts `route`), and for an app caller no `after` hook
  *    runs, no idempotency key is forwarded (calls.ts `forward`) and no log or status field carries the result.
