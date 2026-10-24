@@ -2,6 +2,12 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## Unreleased — person-op relay (C326, C337a; spec 0.1.64)
+
+- **Relay** (BRIDGE §15, PORTAL-API v0.1.64 C): one long-poll `GET /bridge/person-ops?wait=25` to Core with the bridge assertion, next to the config pull; never in standalone mode. Each queued person op is forwarded ONCE to the app (`POST <internalUrl>/tb/v1/person-op`, header `TB-Person-Op`, the exact UTF-8 body bytes, timeout `PERSON_OP_RELAY.bridgeForwardS`) and the app's status and body go back in `POST /bridge/person-ops/{pop}/result`; `409 instance_unknown` for an instance outside the config, `-1` not delivered (connect refused, DNS, TLS), `0` outcome unknown (timeout or broken answer after sending, answer over 96 KiB). At most 4 at once; no forward retries; the result post is retried once on a network error. Logs carry pop, ins, op, status and ms only. Pause does not stop it (ARCHITECTURE.md section 13).
+- **Cap** `person_ops` in `StatusReport.bridge.caps` (not in re-minted standalone slices).
+- Pin: `@opt2-tealbrick/spec` 0.1.64 (`packages/bridge`); the lockfile and its integrity are pinned after the spec release.
+
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
 - **Ingest** `POST /tb/v1/events` on the internal listener (BRIDGE §14.1): instance assertion of the claimed app instance (`htm`, `htu`, `bd`); a companion service → 403; body ≤ 512 KiB, 1..100 items processed in order with one result per item; 429 from the companion-call bucket of the instance; 503 `app_not_claimed` for an instance the config does not list. Per item the §14.1 steps in order (declaration, shape and size, scoped ⇔ `instanceId` + `eligible`, target ⇔ `to`, dedupe of `(app instance, key)` for 7 days, emits and purges alike), with the shared rules of `@opt2-tealbrick/manifest` 0.1.30.

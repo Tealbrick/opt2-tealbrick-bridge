@@ -712,7 +712,8 @@ function safeDigest(ctx: BridgeContext, v: Json): string | undefined {
 
 const isTimeout = (e: unknown) => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
 const PRE_CONNECT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
-function isPreConnect(e: unknown): boolean {
+/** the connection failed before any byte of the request was sent (also the person-op relay's "not delivered", person-ops.ts) */
+export function isPreConnect(e: unknown): boolean {
   const cause = (e as { cause?: { code?: string } })?.cause;
   return !!cause?.code && PRE_CONNECT.has(cause.code);
 }
