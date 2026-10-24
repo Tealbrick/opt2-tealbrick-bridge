@@ -2,6 +2,13 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.8 — hook target tool, secretOutput ops (C336 RQ-2, RQ-3; spec 0.1.66)
+
+- **Hook target `tool` (BRIDGE §8.2 v0.1.66, RQ-2).** For a dynamic call (a listed dynamic entry, `<op>_call`, or a companion/relay call of a dynamic op) every hook request (before, context, after) carries `call.target.tool` = the catalog entry name; `crud`, `effect` and `holdFamily` are that entry's resolution (as before). Absent for static ops; dynamic search never routes a call.
+- **`secretOutput` ops (MANIFEST M-OP-11, RQ-3).** For an op with `secretOutput: true` the bridge calls no `after` hook, forwards no idempotency key to the app (the app keeps no row; M-OP-11 requires `idempotency: "none"`, so the bridge derives none either), and returns the result to the caller only. The call log line keeps ids, codes and the input digest only, as for every call.
+- The new fields are read structurally (`// spec 0.1.66`): the pins stay spec 0.1.57 / manifest 0.1.30 until spec 0.1.66 and manifest 0.1.31 are released. Until the manifest re-pin, the bridge's validator (manifest 0.1.30) refuses a manifest that declares `secretOutput` (fail closed); `requiredBridgeVersion` in manifest 0.1.31 names bridge 0.2.8 for such a manifest.
+- Test: `packages/bridge/test/c336-hook-tool-secret.test.ts` (positive control: the same op without the flag runs the after hook and forwards the key).
+
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
 - **Ingest** `POST /tb/v1/events` on the internal listener (BRIDGE §14.1): instance assertion of the claimed app instance (`htm`, `htu`, `bd`); a companion service → 403; body ≤ 512 KiB, 1..100 items processed in order with one result per item; 429 from the companion-call bucket of the instance; 503 `app_not_claimed` for an instance the config does not list. Per item the §14.1 steps in order (declaration, shape and size, scoped ⇔ `instanceId` + `eligible`, target ⇔ `to`, dedupe of `(app instance, key)` for 7 days, emits and purges alike), with the shared rules of `@opt2-tealbrick/manifest` 0.1.30.

@@ -143,6 +143,15 @@ export const PARENT_CALL_TTL_MS = 120_000;
 /** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
 class HookBadAnswer extends Error {}
 
+/**
+ * spec 0.1.66 (C336 RQ-3, S-8; MANIFEST M-OP-11, BRIDGE v0.1.66): the op's output carries a secret. The bridge forwards the
+ * result to the caller only: no `after` hook, no idempotency key forwarded (the app keeps no row), never logged. Read
+ * structurally until the spec pin carries `Operation.secretOutput`.
+ */
+export function isSecretOutputOp(op: OperationView): boolean {
+  return !op.standard && (op as { secretOutput?: unknown }).secretOutput === true;
+}
+
 function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Pick<Target, "app">, op: OperationView): boolean {
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
 }
@@ -520,6 +529,9 @@ export class CallRouter {
           instance: target.app.entry.ins,
           product: target.app.entry.product,
           op: op.id,
+          // spec 0.1.66 (C336 RQ-2, BRIDGE §8.2): a dynamic call names its catalog entry; crud/effect/holdFamily below are
+          // then that entry's resolution (effectiveOp). Absent for static ops (dynamic search never routes a call here).
+          ...(!target.op.standard && target.op.dynamic && target.tool ? { tool: target.tool } : {}),
           crud: op.crud,
           effect: op.effect,
           ...(!op.standard && op.holdFamily ? { holdFamily: op.holdFamily } : {}),
@@ -576,8 +588,8 @@ export class CallRouter {
       this.requireListedHooks(t1, target1, op);
       // 10. forward
       const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context, hv);
-      // 12. after hooks (ok only)
-      if (result.status === "ok") {
+      // 12. after hooks (ok only). spec 0.1.66: never for a secretOutput op — the result goes to the caller only
+      if (result.status === "ok" && !isSecretOutputOp(target1.op)) {
         let output: JsonValue = result.output;
         active.inHook = true;
         for (const h of this.matchingHooks(t1, "after", target1, op)) {
@@ -640,7 +652,9 @@ export class CallRouter {
       },
       id.key,
     );
-    const body = JSON.stringify({ input, context, ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}) });
+    // spec 0.1.66: a secretOutput op is never replayed from a stored result; no key reaches the app (M-OP-11: idempotency none)
+    const idempotencyKey = isSecretOutputOp(target.op) ? undefined : req.idempotencyKey;
+    const body = JSON.stringify({ input, context, ...(idempotencyKey ? { idempotencyKey } : {}) });
     const url = new URL(`/tb/v1/ops/${opId}`, target.app.entry.internalUrl);
     const send = () =>
       this.ctx.fetch(url, {
