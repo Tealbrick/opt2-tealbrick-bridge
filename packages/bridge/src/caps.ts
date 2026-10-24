@@ -21,16 +21,16 @@
  *    the relay's dynamic call; all through calls.ts `route`) the hook `call.target.tool` is the resolution's canonical tool
  *    with its crud/effect/holdFamily, absent for static ops; a resolution whose tool differs from the requested name or is not
  *    `^[a-z][a-z0-9_]{1,62}$` is refused `dynamic_resolve_failed` (calls.ts `resolve`, `effectiveOp`).
- *  - `secret_output` (spec 0.1.68, bridge 0.2.8, MANIFEST M-OP-12) = a `secretOutput` op is never listed for agents (tools.ts
- *    `visibleOps`), an agent call is refused `secret_output_app_only` (calls.ts `route`), and for an app caller no `after` hook
- *    runs, no idempotency key is forwarded (calls.ts `forward`) and no log or status field carries the result.
+ *  - `secret_output` (spec 0.1.68, MANIFEST M-OP-12) is NOT declared yet (C354, BRIDGE23-3): the secretOutput code paths are in
+ *    (tools.ts `visibleOps`, calls.ts `route` / `forward`), but this build pins a manifest validator (0.1.30) that refuses a
+ *    manifest with `secretOutput`, so no such app can run here. Declare it in the change that re-pins manifest >= 0.1.31.
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
-/** spec 0.1.68: `hook_tool` and `secret_output` join `BRIDGE_CAPS`; local until the spec pin carries them. */
-export type DeclaredCap = BridgeCap | "hook_tool" | "secret_output";
+/** spec 0.1.68: `hook_tool` joins `BRIDGE_CAPS`; local until the spec pin carries it (`secret_output` waits for the manifest re-pin). */
+export type DeclaredCap = BridgeCap | "hook_tool";
 
-export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "hook_tool", "secret_output"];
+export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "hook_tool"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log

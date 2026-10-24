@@ -161,6 +161,53 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
     resolveAs = (t) => t;
   });
 
+  test("BRIDGE23-1 (spec 0.1.68 {1,62}, C354): a resolved variant of 49 and of 63 chars (a 48-char catalog name + `__first_contact`) passes and is the hook target.tool; 64 chars is refused", async () => {
+    const base48 = `g${"m".repeat(47)}`;
+    const base46 = base48.slice(0, 46);
+    for (const [requested, resolved] of [
+      [base46, `${base46}__x`],
+      [base48, `${base48}__first_contact`],
+    ] as const) {
+      assert.ok(resolved.length >= 49 && resolved.length <= 63, String(resolved.length));
+      resolveAs = () => resolved;
+      const from = w.appLog.hooks.length;
+      const r = await mcpCall("notes__notes_tools_call", { tool: requested, arguments: {} });
+      assert.notEqual(r.isError, true, `${resolved.length} chars: ${JSON.stringify(r)}`);
+      const seen = hooksSince(from);
+      assert.deepEqual(
+        seen.map((x) => x.phase),
+        ["before", "context", "after"],
+      );
+      for (const x of seen) assert.equal(x.target.tool, resolved, `${resolved.length} chars, ${x.phase}`);
+    }
+    // a fresh requested name (resolutions are cached per requested name)
+    const other48 = `h${"m".repeat(47)}`;
+    const name64 = `${other48}__first_contact_`;
+    assert.equal(name64.length, 64);
+    resolveAs = () => name64;
+    const from = w.appLog.hooks.length;
+    const r = await mcpCall("notes__notes_tools_call", { tool: other48, arguments: {} });
+    assert.equal(r.structuredContent?.error?.code, "dynamic_resolve_failed", "64 chars is refused");
+    assert.equal(w.appLog.hooks.length, from, "no hook ran");
+    resolveAs = (t) => t;
+  });
+
+  test("C354: the variant rule is exact — a suffix needs `__`, a variant of a variant or of another tool is refused", async () => {
+    for (const [requested, resolved] of [
+      // fresh requested names (resolutions are cached per requested name)
+      ["vr_a", "vr_ax"],
+      ["vr_b", "vr_b__"],
+      ["vr_c", "vr_c_first_contact"],
+      ["vr_d", "vr_dd__first_contact"],
+      ["vr_e__first_contact", "vr_e__first_contact__again"],
+    ] as const) {
+      resolveAs = () => resolved;
+      const r = await mcpCall("notes__notes_tools_call", { tool: requested, arguments: {} });
+      assert.equal(r.structuredContent?.error?.code, "dynamic_resolve_failed", `${requested} → ${resolved}`);
+    }
+    resolveAs = (t) => t;
+  });
+
   test("B29.hook_tool_bypass: case, space and alias variants of a tool the app maps to its canonical name are refused, never run as it", async () => {
     // an app that canonicalises spellings (case-folds, trims, maps an alias) answers the canonical name: the bridge refuses
     resolveAs = (t) => (t.trim().toLowerCase() === "send" ? "gb_send" : t.trim().toLowerCase());

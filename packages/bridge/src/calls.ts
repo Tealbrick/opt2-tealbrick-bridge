@@ -49,6 +49,12 @@ export type CallOutcome = OpResult<JsonValue>;
 export const RESOLVE_TTL_MS = 5 * 60_000;
 /** spec 0.1.68 (BRIDGE v0.1.68, cap `hook_tool`): a dynamic resolution's canonical tool name. */
 export const DYNAMIC_TOOL_RE = /^[a-z][a-z0-9_]{1,62}$/; // spec 0.1.68: catalog names (<= 48) and resolved variants such as `<tool>__first_contact`
+
+/** spec 0.1.68 (C354): `resolved` is the requested tool, or its variant `<requested>__<suffix>` (a requested name with `__` has no variants). */
+export function resolvesAs(requested: string, resolved: string): boolean {
+  if (resolved === requested) return true;
+  return !requested.includes("__") && resolved.startsWith(`${requested}__`) && resolved.length > requested.length + 2;
+}
 const APP_TIMEOUT_MS = 30_000;
 /** F57a: message of a call cut off at the drain bound (it may have run: the caller checks before retrying) */
 const CUT_OFF = "the bridge restarted while this call ran; its outcome is unknown, check before retrying";
@@ -325,10 +331,12 @@ export class CallRouter {
     if ((value.effect === "outward" || value.effect === "money") && !(typeof value.holdFamily === "string" && value.holdFamily)) {
       throw new BridgeError("dynamic_resolve_failed", 403, "the app resolved an outward or money tool without a hold family", { reason: "family_missing" });
     }
-    // spec 0.1.68 (BRIDGE v0.1.68, cap `hook_tool`): the resolution names the app's canonical tool, which hooks see as
-    // `target.tool`; it must be exactly the requested name and a canonical name. A case, space or alias variant is refused,
-    // never mapped, so a hold on a tool cannot be bypassed by spelling it differently. Refused, not cached.
-    if (typeof value.tool !== "string" || value.tool !== tool || !DYNAMIC_TOOL_RE.test(value.tool)) {
+    // spec 0.1.68 (BRIDGE v0.1.68, cap `hook_tool`; C354): the resolution names the app's canonical tool, which hooks see as
+    // `target.tool`. It is the requested name itself, or a resolved variant of it `<requested>__<suffix>` (e.g. Connect's
+    // `<tool>__first_contact`; catalog names never contain `__`, and policy rules naming `x` also match `x__<suffix>`), and it
+    // matches DYNAMIC_TOOL_RE (≤ 63 chars). A case, space or alias variant is refused, never mapped, so a hold on a tool cannot
+    // be bypassed by spelling it differently. Refused, not cached.
+    if (typeof value.tool !== "string" || !resolvesAs(tool, value.tool) || !DYNAMIC_TOOL_RE.test(value.tool)) {
       throw new BridgeError("dynamic_resolve_failed", 403, "the app's resolution names a different or malformed tool", { reason: "tool_mismatch" });
     }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
