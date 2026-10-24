@@ -16,10 +16,17 @@ export type ToolRoute =
   | { kind: "dynamic_search"; app: AppRuntime; op: OperationView }
   | { kind: "dynamic_call"; app: AppRuntime; op: OperationView }
   | { kind: "hold_status"; app: AppRuntime; op: OperationView }
-  | { kind: "skills"; app: AppRuntime };
+  | { kind: "skills"; app: AppRuntime }
+  /** spec 0.1.66 BRIDGE §7.5: bridge-answered search over the agent's lazy ops of this product */
+  | { kind: "more_search"; app: AppRuntime; lazy: ToolDef[] }
+  /** spec 0.1.66 BRIDGE §7.5: resolved in mcp.ts to the named op's own `op` route, then the direct call */
+  | { kind: "more_call"; app: AppRuntime };
 
 export interface ToolDef {
   name: string;
+  /** the op behind a static op tool (lazy search answers name it; never sent in tools/list) */
+  op?: string;
+  effect?: string;
   title?: string;
   description: string;
   inputSchema: JsonSchemaObject;
@@ -39,6 +46,18 @@ export interface ToolIndex {
 }
 
 const NAME_RE = new RegExp(TOOL_NAME_RULE.pattern);
+
+/**
+ * Spec 0.1.66 (C330(1), M4b; BRIDGE §7.5, MANIFEST §5.5): `listing: "lazy"` and the per-product pair. The pinned spec (0.1.57)
+ * predates them: the names are read from `TOOL_NAME_RULE` when the pinned spec has them, else the spec 0.1.66 values.
+ * TEMPORARY: the pin bump to spec ≥ 0.1.66 removes the fallbacks (one mechanism, L1).
+ */
+const RULE_066 = TOOL_NAME_RULE as typeof TOOL_NAME_RULE & { moreSearchOp?: string; moreCallOp?: string };
+export const MORE_SEARCH_OP: string = RULE_066.moreSearchOp ?? "tb_more_search";
+export const MORE_CALL_OP: string = RULE_066.moreCallOp ?? "tb_more_call";
+/** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.66, M-OP-12; tolerated here: listed) */
+export const isLazyOp = (op: OperationView): boolean => !op.standard && !op.dynamic && (op.listing as string | undefined) === "lazy";
+const MORE_HINT_IDS = 5;
 const SEARCH_SCHEMA: JsonSchemaObject = {
   type: "object",
   additionalProperties: false,
@@ -59,6 +78,35 @@ function annotations(effect: string): ToolDef["annotations"] {
     readOnlyHint: effect === "read",
     destructiveHint: effect === "destructive",
     openWorldHint: effect === "outward" || effect === "money",
+  };
+}
+
+/** §7.5: annotations of `tb_more_call` = the widest of the product's lazy ops */
+function widest(effects: readonly string[]): ToolDef["annotations"] {
+  return {
+    readOnlyHint: effects.every((e) => e === "read"),
+    destructiveHint: effects.includes("destructive"),
+    openWorldHint: effects.some((e) => e === "outward" || e === "money"),
+  };
+}
+
+/**
+ * §7.5 `tb_more_search`: lower-case; words `[a-z0-9]+`; an op matches when at least one word is a substring of its op id,
+ * title or description; rank by distinct matching words (desc), then op id (asc). `"*"` = every lazy op.
+ */
+export function searchLazy(lazy: readonly ToolDef[], query: string, limit = 10): { tools: { tool: string; title: string; description: string; inputSchema: JsonSchemaObject; effect: string }[]; total: number } {
+  const all = query.trim() === "*";
+  const words = [...new Set(query.toLowerCase().match(/[a-z0-9]+/g) ?? [])];
+  const scored = lazy
+    .map((d) => {
+      const hay = `${d.op ?? ""}\n${d.title ?? ""}\n${d.description}`.toLowerCase();
+      return { d, score: all ? 1 : words.filter((w) => hay.includes(w)).length };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || (a.d.op ?? "").localeCompare(b.d.op ?? ""));
+  return {
+    tools: scored.slice(0, limit).map(({ d }) => ({ tool: d.name, title: d.title ?? d.op ?? d.name, description: d.description, inputSchema: d.inputSchema, effect: d.effect ?? "read" })),
+    total: scored.length,
   };
 }
 
@@ -96,17 +144,22 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
   let dynamic = false;
   let incomplete = false;
   const prefix = `${agtRef(agt)}|`;
-  const add = (app: AppRuntime, def: ToolDef, route: ToolRoute) => {
+  /** `listed: false` = routed (callable by name) but left out of tools/list (a lazy op, §7.5) */
+  const add = (app: AppRuntime, def: ToolDef, route: ToolRoute, listed = true): boolean => {
     if (def.name.length > TOOL_NAME_RULE.maxLength || !NAME_RE.test(def.name)) {
       ctx.toolsOmitted.set(`${app.entry.ins}|${def.name}`, { ins: app.entry.ins, name: def.name.slice(0, 120), code: "tool_name_too_long" });
-      return;
+      return false;
     }
     if (routes.has(def.name)) {
       ctx.toolsOmitted.set(`${app.entry.ins}|${def.name}`, { ins: app.entry.ins, name: def.name, code: "name_collision" });
-      return;
+      return false;
     }
     routes.set(def.name, route);
-    tools.push(def);
+    if (listed) {
+      const { op: _op, effect: _effect, ...shown } = def;
+      tools.push(shown);
+    }
+    return true;
   };
   const entries = [...t.grants.entries()].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b));
   for (const [, g] of entries) {
@@ -116,6 +169,7 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
     const product = app.entry.product;
     const ops = visibleOps(ctx, app, g.claims, ctx.admittedOps.get(`${agt}|${ins}`));
     let any = false;
+    const lazy: ToolDef[] = [];
     for (const op of ops) {
       if (op.standard) continue;
       if (op.dynamic?.mode === "list") {
@@ -154,10 +208,21 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         any = true;
         continue;
       }
-      add(app, { name: `${product}__${op.id}`, title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, annotations: annotations(op.effect) }, { kind: "op", app, op });
+      const def: ToolDef = { name: `${product}__${op.id}`, title: op.title, description: op.description, inputSchema: op.input ?? { type: "object" }, annotations: annotations(op.effect), op: op.id, effect: op.effect };
+      if (isLazyOp(op)) {
+        if (add(app, def, { kind: "op", app, op }, false)) lazy.push(def);
+      } else add(app, def, { kind: "op", app, op });
       any = true;
     }
     if (!any) continue;
+    if (lazy.length > 0) {
+      // §7.5: one pair per product; the search is answered from this list, the call resolves to the op's own route
+      const name = app.manifest?.name ?? product;
+      const ids = lazy.slice(0, MORE_HINT_IDS).map((d) => d.op).join(", ");
+      const effects = lazy.map((d) => d.effect ?? "read");
+      add(app, { name: `${product}__${MORE_SEARCH_OP}`, title: `${name}: more tools`, description: `Find more ${name} tools: ${lazy.length} not listed here (e.g. ${ids}${lazy.length > MORE_HINT_IDS ? ", …" : ""}). Input: words to look for, or "*" for all. Returns each tool's name, description and input schema; call one with ${product}__${MORE_CALL_OP}.`, inputSchema: SEARCH_SCHEMA, annotations: { readOnlyHint: true } }, { kind: "more_search", app, lazy });
+      add(app, { name: `${product}__${MORE_CALL_OP}`, title: `${name}: call a tool`, description: `Call one ${name} tool found with ${product}__${MORE_SEARCH_OP}. Input: {"tool": "<name from the search>", "arguments": {…}}. Same checks, approvals and receipts as a direct call.`, inputSchema: CALL_SCHEMA, annotations: widest(effects) }, { kind: "more_call", app });
+    }
     const hold = app.ops.get("tb.hold_status");
     if (hold) {
       add(app, { name: `${product}__${TOOL_NAME_RULE.holdStatusOp}`, title: "Hold status", description: `Check a call to ${app.manifest?.name ?? product} that is waiting for the owner's approval. Input: the holdId from the held result.`, inputSchema: HOLD_SCHEMA, annotations: { readOnlyHint: true } }, { kind: "hold_status", app, op: hold });
