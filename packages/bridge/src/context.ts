@@ -12,6 +12,7 @@ import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
+import type { ScopeSourceItem } from "./scope-summary.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -87,7 +88,8 @@ export class BridgeContext extends EventEmitter {
   readonly health = new Map<InstanceId, AppHealth>();
   /** C268c: which hook apps accept `bd` in the call proof (proof-caps.ts) */
   readonly proofCaps = new ProofCaps();
-  readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
+  /** spec 0.1.65 (C331 D8): `sources` = the app's scope instances of that agent, as cleaned in scope-summary.ts (absent = not reported) */
+  readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string; sources?: ScopeSourceItem[] }>();
   /** when each app instance was last asked for its scope summary (ms), and the request in flight (scope-summary.ts) */
   readonly scopeSummaryAt = new Map<InstanceId, number>();
   readonly scopeSummaryRuns = new Map<InstanceId, Promise<void>>();

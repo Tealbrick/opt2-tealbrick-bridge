@@ -68,6 +68,7 @@ describe("C283 A1: owner-row filter (bridge 0.2.5)", () => {
   let client: AppClient;
   let admitted: unknown[] = [];
   let label = "1 Notebook";
+  let sources: unknown;
   const CON2 = "con_01HBBBBBBBBBBBBBBBBBBBBBBB";
   before(async () => {
     w = await makeWorld({ real: true });
@@ -80,7 +81,7 @@ describe("C283 A1: owner-row filter (bridge 0.2.5)", () => {
     });
     await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
     w.bridgeOps.answer = (path, body) => {
-      if (path === "scope-summary") return [{ agent: AGT, label, admittedOps: admitted }, { agent: AGT2, label: "none" }];
+      if (path === "scope-summary") return [{ agent: AGT, label, admittedOps: admitted, ...(sources !== undefined ? { sources } : {}) }, { agent: AGT2, label: "none" }];
       if (path === "catalog") {
         // the SDK marks per agent: AGT's owner row admits the update entry, AGT2 has none
         const mark = body?.agent === AGT ? { admitted: "owner" } : {};
@@ -160,6 +161,37 @@ describe("C283 A1: owner-row filter (bridge 0.2.5)", () => {
       [[AGT, "1 Notebook"], [AGT2, "none"]],
     );
     for (const s of mine) assert.deepEqual(Object.keys(s).sort(), ["agt", "ins", "label"]);
+  });
+
+  test("C331 D8 (spec 0.1.65): the app's sources reach the StatusReport cleaned; a change of sources alone pokes Portal; none from an old SDK", async () => {
+    const c = (code: number) => String.fromCharCode(code);
+    let health = 0;
+    const count = () => {
+      health += 1;
+    };
+    w.bridge.ctx.on("health", count);
+    try {
+      sources = [
+        { type: "notebook", id: "nb_1", label: `Team${c(0x200b)} notes${c(0x202e)}${c(7)}`, access: "read" },
+        { type: "Notebook", id: "nb_2", label: "bad type", access: "read" },
+        { type: "notebook", id: "has space", label: "bad id", access: "read" },
+        { type: "notebook", id: "nb_3", label: c(0x200b), access: "read" },
+        "text",
+        ...Array.from({ length: 30 }, (_, i) => ({ type: "notebook", id: `nb_x${i}`, label: `Book ${i}`, access: "read" })),
+      ];
+      await settle(["notes_s_update"]);
+      const row = buildStatusReport(w.bridge.ctx).scopeSummaries.find((s) => s.ins === INS && s.agt === AGT) as { sources?: { id: string; label: string }[] } | undefined;
+      assert.deepEqual(row?.sources?.[0], { type: "notebook", id: "nb_1", label: "Team notes", access: "read" });
+      assert.equal(row?.sources?.length, 20 - 4, "the first 20 items are read; malformed ones are dropped, never repaired");
+      assert.equal(health, 1, "new sources (same label): one health event");
+      sources = undefined;
+      await settle(["notes_s_update"]);
+      const old = buildStatusReport(w.bridge.ctx).scopeSummaries.find((s) => s.ins === INS && s.agt === AGT);
+      assert.deepEqual(Object.keys(old ?? {}).sort(), ["agt", "ins", "label"], "an SDK before 0.1.65 sends no sources: none forwarded");
+    } finally {
+      w.bridge.ctx.off("health", count);
+      sources = undefined;
+    }
   });
 
   test("a new scope summary without the op removes it from tools/list again", async () => {

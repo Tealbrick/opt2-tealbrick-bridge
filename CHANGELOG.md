@@ -2,6 +2,10 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## Unreleased — scope sources in the status report (C331 D8; spec 0.1.65 shape, local types until the pin)
+
+- `scope_summary` answers may carry `sources` (the agent's scope instances: type, the app's instance id, label, access). The bridge keeps the first 20 well-formed items (snake type and access, id `[A-Za-z0-9_-]{1,64}`), strips `\p{Cc}`/`\p{Cf}` from labels and clamps them to 60, drops malformed items, and forwards them in `StatusReport.scopeSummaries[].sources`. An answer without `sources` (SDK before 0.1.65) forwards none. A change of sources alone pokes Portal like a label change. Display only.
+
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
 - **Ingest** `POST /tb/v1/events` on the internal listener (BRIDGE §14.1): instance assertion of the claimed app instance (`htm`, `htu`, `bd`); a companion service → 403; body ≤ 512 KiB, 1..100 items processed in order with one result per item; 429 from the companion-call bucket of the instance; 503 `app_not_claimed` for an instance the config does not list. Per item the §14.1 steps in order (declaration, shape and size, scoped ⇔ `instanceId` + `eligible`, target ⇔ `to`, dedupe of `(app instance, key)` for 7 days, emits and purges alike), with the shared rules of `@opt2-tealbrick/manifest` 0.1.30.
