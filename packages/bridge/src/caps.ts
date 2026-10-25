@@ -40,3 +40,23 @@ export function bridgeCaps(ctx: { events?: { available: boolean } | undefined })
   // spec 0.1.68: the wire type is the pinned BridgeCap until the re-pin; the wire schema takes any cap matching its pattern
   return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true) as BridgeCap[];
 }
+
+/**
+ * spec 0.1.68 (C354, MANIFEST `requires.bridgeCaps`, QA-C354-2): the first bridge capability a manifest needs that this build does
+ * not declare, else undefined. Needed = `requires.bridgeCaps` plus the caps its features imply (a `secretOutput` op →
+ * `secret_output`), exactly as manifest `requiredBridgeCaps()` (sdk#51) computes them; that function is used when the pinned
+ * manifest API has it, else the fields are read structurally (`// spec 0.1.68`) until the re-pin. Compared with the build's
+ * declared set (never with a version). Only ever refuses: it never widens what an app may do.
+ */
+export function missingBridgeCap(manifest: unknown, api: object = {}, declared: readonly string[] = BRIDGE_CAPS_DECLARED): string | undefined {
+  const shared = (api as { requiredBridgeCaps?: (m: unknown) => string[] }).requiredBridgeCaps;
+  const needed = typeof shared === "function" ? shared(manifest) : requiredCapsStructural(manifest);
+  return needed.find((c) => !declared.includes(c));
+}
+
+function requiredCapsStructural(manifest: unknown): string[] {
+  const m = (manifest ?? {}) as { requires?: { bridgeCaps?: unknown }; operations?: unknown };
+  const caps = new Set<string>(Array.isArray(m.requires?.bridgeCaps) ? m.requires.bridgeCaps.filter((c): c is string => typeof c === "string") : []);
+  if (Array.isArray(m.operations) && m.operations.some((o) => (o as { secretOutput?: unknown } | null)?.secretOutput === true)) caps.add("secret_output");
+  return [...caps].sort();
+}

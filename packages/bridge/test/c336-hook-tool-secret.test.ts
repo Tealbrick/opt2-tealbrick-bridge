@@ -17,6 +17,7 @@ import { after, before, describe, test } from "node:test";
 import { DYNAMIC_CALL_INPUT_SCHEMA, validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { CallRouter } from "../src/calls.ts";
+import { buildToolIndex } from "../src/tools.ts";
 import { jsonLogger } from "../src/util.ts";
 import { AGT, APP_CODE, BRG, CON, HOOKINS, INS, makeWorld, notesManifest, type World, WS, waitFor } from "./support/world.ts";
 
@@ -272,31 +273,34 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
     }
   });
 
-  test("C-SO-2 (bridge): a secretOutput op is not listed for agents, and an agent call is refused secret_output_app_only before anything runs", async () => {
+  test("C-SO-2 (bridge): a secretOutput op is not listed for agents (positive control: the same op without the flag IS listed), and an agent call is refused secret_output_app_only before anything runs", async () => {
+    const t = w.bridge.ctx.table;
+    assert.ok(t);
     const a = app();
     const base = a.ops.get("notes_list") as OperationView;
     const lease = { ...base, id: "notes_lease", secretOutput: true } as unknown as OperationView; // spec 0.1.68
-    (a.ops as Map<string, OperationView>).set("notes_lease", lease);
+    const control = { ...base, id: "notes_lease_plain" } as OperationView; // the same op without the flag
+    const ops = a.ops as Map<string, OperationView>;
+    ops.set("notes_lease", lease);
+    ops.set("notes_lease_plain", control);
     try {
-      const token = await w.agentToken();
-      const init = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c336-list" } } });
-      w.bridge.ctx.table && (await w.publish());
-      await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
-      (w.bridge.ctx.table?.apps.get(INS as never)?.ops as Map<string, OperationView> | undefined)?.set("notes_lease", lease);
-      const list = await w.mcp(token, { jsonrpc: "2.0", id: 2, method: "tools/list" }, init.session as string);
-      const names = (list.json.result.tools as { name: string }[]).map((t) => t.name);
-      assert.ok(names.includes("notes__notes_list"), "control: the other ops are listed");
+      // QA-BRIDGE23-4: the index is built AFTER both ops are in the table (no cached index can hide a missing filter)
+      const index = await buildToolIndex(w.bridge.ctx, new CallRouter(w.bridge.ctx), t, AGT as never);
+      const names = index.tools.map((x) => x.name);
+      assert.ok(names.includes("notes__notes_lease_plain"), "positive control: the same op without secretOutput is listed");
       assert.equal(names.includes("notes__notes_lease"), false, "the secretOutput op is not an agent tool");
+      assert.equal(index.routes.has("notes__notes_lease"), false, "and has no route");
       const from = w.appLog.hooks.length;
-      const ops = w.appLog.ops.length;
+      const forwarded = w.appLog.ops.length;
       await assert.rejects(
-        new CallRouter(w.bridge.ctx).route({ caller: agent, target: { app: app(), op: lease }, input: {} as never }),
+        new CallRouter(w.bridge.ctx).route({ caller: agent, target: { app: a, op: lease }, input: {} as never }),
         (e: unknown) => (e as { code?: string; status?: number }).code === "secret_output_app_only" && (e as { status?: number }).status === 403,
       );
       assert.equal(w.appLog.hooks.length, from, "no hook ran");
-      assert.equal(w.appLog.ops.length, ops, "nothing forwarded");
+      assert.equal(w.appLog.ops.length, forwarded, "nothing forwarded");
     } finally {
-      (w.bridge.ctx.table?.apps.get(INS as never)?.ops as Map<string, OperationView> | undefined)?.delete("notes_lease");
+      ops.delete("notes_lease");
+      ops.delete("notes_lease_plain");
     }
   });
 });

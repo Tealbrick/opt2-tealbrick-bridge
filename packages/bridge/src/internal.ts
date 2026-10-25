@@ -12,6 +12,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
+import { missingBridgeCap } from "./caps.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { fetchManifestFrom } from "./portal.ts";
@@ -185,6 +186,9 @@ export class InternalApi {
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
+      // spec 0.1.68 (C354): the same capability check as an app's manifest fetch (portal.ts fetchManifestFrom)
+      const missing = missingBridgeCap(v.manifest, ctx.api);
+      if (missing) throw new BridgeError("bridge_cap_missing", 409, `this bridge does not declare the capability ${missing}`, { cap: missing });
       manifest = v.manifest;
     } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {
       // G2b: the claim may carry the serving digest or, mid-attempt, the candidate digest; anything else is refused
