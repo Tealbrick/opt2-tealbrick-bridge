@@ -3,6 +3,7 @@
  * long-poll, key fetch, model-role resolve (v0.1.63), app→app companion call, metrics. Callers prove themselves with instance
  * assertions (`TB-Assert`, typ tb-instance-assert+jwt, bound to method, path and body).
  */
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { EVENT_BATCH_MAX } from "@opt2-tealbrick/manifest";
 import { isRefusal, SDK_CURRENT_MAJOR } from "@opt2-tealbrick/relay";
@@ -13,7 +14,7 @@ import type { ErrorCode } from "@opt2-tealbrick/spec/routes";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
-import { missingBridgeCap } from "./caps.ts";
+import { declaredCaps, missingBridgeCap } from "./caps.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { resolveForCaller } from "./model-roles.ts";
@@ -206,7 +207,7 @@ export class InternalApi {
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
       // spec 0.1.68 (C354): the same capability check as an app's manifest fetch (portal.ts fetchManifestFrom)
-      const missing = missingBridgeCap(v.manifest, ctx.api);
+      const missing = missingBridgeCap(v.manifest, ctx.api, declaredCaps(ctx));
       if (missing) throw new BridgeError("bridge_cap_missing", 409, `this bridge does not declare the capability ${missing}`, { cap: missing });
       manifest = v.manifest;
     } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {

@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { OPERATION_LISTINGS } from "@opt2-tealbrick/spec/manifest";
 import { PERSONA_MAX_CHARS, PERSONA_PATTERN } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
@@ -65,8 +66,18 @@ export interface BridgeOptions {
   viewsUrl?: string | undefined;
   /** BSD-08: Portal Root Keys; default = this build's channel. Only a test harness replaces them (start option). */
   portalRoots?: Ed25519PublicJwk[];
+  /** spec 0.1.76 BRIDGE §7.5 test harness only: run the lazy-tools path although the pinned validator predates it ({@link LAZY_TOOLS_PINNED}) */
+  lazyTools?: boolean;
   fetch?: typeof fetch;
 }
+
+/**
+ * Spec 0.1.76 (C330(1), M4b, C354 capability gating): this build serves `listing: "lazy"` (BRIDGE §7.5) only when its pinned
+ * vocabulary knows the value, i.e. its validator accepts it. Otherwise a manifest with a lazy op is refused at fetch
+ * (`bridge_cap_missing`) and never registered half-working. The pin bump to spec >= 0.1.76 makes this true and declares the
+ * `lazy_tools` cap in the same change (caps.ts); until then this bridge never declares it.
+ */
+export const LAZY_TOOLS_PINNED: boolean = (OPERATION_LISTINGS as readonly string[]).includes("lazy");
 
 export interface AppHealth {
   status: AppStatus;
@@ -74,6 +85,8 @@ export interface AppHealth {
 }
 
 export class BridgeContext extends EventEmitter {
+  /** BRIDGE §7.5: lazy-tools path on ({@link LAZY_TOOLS_PINNED}, or the test-harness option) */
+  readonly lazyTools: boolean;
   readonly api: ManifestApi;
   readonly state: BridgeState;
   readonly log: Logger;
@@ -147,6 +160,7 @@ export class BridgeContext extends EventEmitter {
     this.#viewsKey = o.viewsKey;
     this.#viewsKeyPrevious = o.viewsKeyPrevious;
     this.portalRoots = o.portalRoots ?? o.api.portalRootKeys(PORTAL_ROOT_CHANNEL);
+    this.lazyTools = o.lazyTools ?? LAZY_TOOLS_PINNED;
     this.fetch = o.fetch ?? fetch;
   }
 

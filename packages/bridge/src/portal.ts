@@ -9,7 +9,7 @@ import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConf
 import { type ConnectionId, LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
-import { bridgeCaps, missingBridgeCap } from "./caps.ts";
+import { bridgeCaps, declaredCaps, missingBridgeCap } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { roleStatuses } from "./model-roles.ts";
 import { remintStandalone } from "./standalone.ts";
@@ -205,7 +205,7 @@ export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Prom
   if (need && ctx.api.compareSemver(need, BRIDGE_VERSION) > 0) throw new ManifestError("bridge_too_old");
   // spec 0.1.68 (C354): an app whose requires.bridgeCaps (or a feature it uses) names a cap this bridge does not declare is
   // refused here, before it is routed (Core refuses such a deploy too; this is the bridge's own check)
-  const missing = missingBridgeCap(v.manifest, ctx.api);
+  const missing = missingBridgeCap(v.manifest, ctx.api, declaredCaps(ctx));
   if (missing) throw new ManifestError("bridge_cap_missing", undefined, `missing bridge cap ${missing}`);
   return v.manifest;
 }

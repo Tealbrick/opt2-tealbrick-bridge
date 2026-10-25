@@ -40,9 +40,18 @@ export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "even
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
  * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined; lazyTools?: boolean }): BridgeCap[] {
   // spec 0.1.68: the wire type is the pinned BridgeCap until the re-pin; the wire schema takes any cap matching its pattern
-  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true) as BridgeCap[];
+  return declaredCaps(ctx).filter((c) => c !== "events" || ctx.events?.available === true) as BridgeCap[];
+}
+
+/**
+ * spec 0.1.76 (C354, BRIDGE §7.5, QA lazy DELTA S4): the build's caps + `lazy_tools` exactly when this bridge serves lazy tools
+ * (`ctx.lazyTools` = its pinned validator knows `listing: "lazy"`, context.ts LAZY_TOOLS_PINNED). One switch: the cap and the
+ * registration gate (missingBridgeCap: a lazy op implies `lazy_tools`) can never disagree. False on this pin (spec 0.1.71).
+ */
+export function declaredCaps(ctx: { lazyTools?: boolean }): string[] {
+  return [...BRIDGE_CAPS_DECLARED, ...(ctx.lazyTools === true ? ["lazy_tools"] : [])];
 }
 
 /**
@@ -62,5 +71,7 @@ function requiredCapsStructural(manifest: unknown): string[] {
   const m = (manifest ?? {}) as { requires?: { bridgeCaps?: unknown }; operations?: unknown };
   const caps = new Set<string>(Array.isArray(m.requires?.bridgeCaps) ? m.requires.bridgeCaps.filter((c): c is string => typeof c === "string") : []);
   if (Array.isArray(m.operations) && m.operations.some((o) => (o as { secretOutput?: unknown } | null)?.secretOutput === true)) caps.add("secret_output");
+  // spec 0.1.76 (MANIFEST M-OP-13, BRIDGE §7.5): a `listing: "lazy"` op implies `lazy_tools`
+  if (Array.isArray(m.operations) && m.operations.some((o) => (o as { listing?: unknown } | null)?.listing === "lazy")) caps.add("lazy_tools");
   return [...caps].sort();
 }
