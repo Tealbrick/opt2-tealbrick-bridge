@@ -198,7 +198,7 @@ export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Prom
   const v = ctx.api.validateManifest(await res.json());
   // the validator's own code (e.g. dynamic_invalid), so Core can say why (L3)
   if (!v.ok) throw new ManifestError(v.errors[0]?.code ?? "manifest_invalid");
-  // spec 0.1.75 (C354, MANIFEST M-OP-13): a manifest with a lazy op needs a bridge with `lazy_tools`; without it, refuse here
+  // spec 0.1.76 (C354, MANIFEST M-OP-13): a manifest with a lazy op needs a bridge with `lazy_tools`; without it, refuse here
   if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new ManifestError("bridge_cap_missing");
   // C104: an app that needs a newer bridge is refused here, never routed half-working
   const need = ctx.api.requiredBridgeVersion(v.manifest).bridge;

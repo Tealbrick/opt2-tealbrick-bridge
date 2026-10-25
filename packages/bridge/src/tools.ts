@@ -17,9 +17,9 @@ export type ToolRoute =
   | { kind: "dynamic_call"; app: AppRuntime; op: OperationView }
   | { kind: "hold_status"; app: AppRuntime; op: OperationView }
   | { kind: "skills"; app: AppRuntime }
-  /** spec 0.1.75 BRIDGE §7.5: bridge-answered search over the agent's lazy ops of this product */
+  /** spec 0.1.76 BRIDGE §7.5: bridge-answered search over the agent's lazy ops of this product */
   | { kind: "more_search"; app: AppRuntime; lazy: ToolDef[] }
-  /** spec 0.1.75 BRIDGE §7.5: resolved in mcp.ts to the named op's own `op` route, then the direct call */
+  /** spec 0.1.76 BRIDGE §7.5: resolved in mcp.ts to the named op's own `op` route, then the direct call */
   | { kind: "more_call"; app: AppRuntime };
 
 export interface ToolDef {
@@ -48,14 +48,14 @@ export interface ToolIndex {
 const NAME_RE = new RegExp(TOOL_NAME_RULE.pattern);
 
 /**
- * Spec 0.1.75 (C330(1), M4b; BRIDGE §7.5, MANIFEST §5.5): `listing: "lazy"` and the per-product pair. The pinned spec (0.1.57)
- * predates them: the names are read from `TOOL_NAME_RULE` when the pinned spec has them, else the spec 0.1.75 values.
- * TEMPORARY: the pin bump to spec ≥ 0.1.75 removes the fallbacks (one mechanism, L1).
+ * Spec 0.1.76 (C330(1), M4b; BRIDGE §7.5, MANIFEST §5.5): `listing: "lazy"` and the per-product pair. The pinned spec (0.1.57)
+ * predates them: the names are read from `TOOL_NAME_RULE` when the pinned spec has them, else the spec 0.1.76 values.
+ * TEMPORARY: the pin bump to spec ≥ 0.1.76 removes the fallbacks (one mechanism, L1).
  */
 const RULE_066 = TOOL_NAME_RULE as typeof TOOL_NAME_RULE & { moreSearchOp?: string; moreCallOp?: string };
 export const MORE_SEARCH_OP: string = RULE_066.moreSearchOp ?? "tb_more_search";
 export const MORE_CALL_OP: string = RULE_066.moreCallOp ?? "tb_more_call";
-/** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.75, M-OP-13; tolerated here: listed) */
+/** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.76, M-OP-13; tolerated here: listed) */
 export const isLazyOp = (op: OperationView): boolean => !op.standard && !op.dynamic && (op.listing as string | undefined) === "lazy";
 const MORE_HINT_IDS = 5;
 /** MANIFEST M-OP-13: does the manifest use `listing: "lazy"` on any op? (a bridge without `lazy_tools` refuses it) */
@@ -194,7 +194,7 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
         }
         const ceiling = EFFECTS.indexOf(op.dynamic.effectCeiling);
         for (const e of catalog) {
-          // spec 0.1.75 (QA-BRIDGE20-2): `tb_` is reserved (MANIFEST §5.4); an entry named tb_* would shadow tb_hold_status,
+          // spec 0.1.76 (QA-BRIDGE20-2): `tb_` is reserved (MANIFEST §5.4); an entry named tb_* would shadow tb_hold_status,
           // tb_skills or the §7.5 pair
           if (e.name.startsWith("tb_")) {
             ctx.toolsOmitted.set(`${app.entry.ins}|${e.name}`, { ins: app.entry.ins, name: e.name, code: "name_collision" });

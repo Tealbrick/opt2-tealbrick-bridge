@@ -206,7 +206,7 @@ export class InternalApi {
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
-      // spec 0.1.75 (C354, MANIFEST M-OP-13): no lazy registration without `lazy_tools`
+      // spec 0.1.76 (C354, MANIFEST M-OP-13): no lazy registration without `lazy_tools`
       if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new BridgeError("bridge_cap_missing", 409, "this bridge does not declare lazy_tools", { cap: "lazy_tools" });
       manifest = v.manifest;
     } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {

@@ -29,7 +29,7 @@ interface Session {
   protocol: string;
   streams: Set<ServerResponse>;
   toolDigest: string;
-  /** spec 0.1.75 BRIDGE §7.5 rule (b): the `tb_more_call` annotations this session was last LISTED (tool name → hints);
+  /** spec 0.1.76 BRIDGE §7.5 rule (b): the `tb_more_call` annotations this session was last LISTED (tool name → hints);
    *  undefined until the session's first tools/list */
   moreListed?: Map<string, NonNullable<ToolDef["annotations"]>>;
   skillsDigest: string;
@@ -195,7 +195,7 @@ export class McpServer {
   }
 
   /**
-   * The digest a session's last tools/list is compared with: names AND annotations (spec 0.1.75 BRIDGE §7.5 rule (a): an owner
+   * The digest a session's last tools/list is compared with: names AND annotations (spec 0.1.76 BRIDGE §7.5 rule (a): an owner
    * change that widens `tb_more_call`'s hints keeps every name, and a client must still hear list_changed).
    */
   private toolsDigest(idx: ToolIndex): string {
@@ -687,7 +687,7 @@ export class McpServer {
         }
         throw new BridgeError("unknown_tool", 404);
       }
-      // spec 0.1.75 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
+      // spec 0.1.76 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
       // call then IS that op's direct call (input = `arguments`; key, gate, hooks, proof, holds and receipts name the op)
       let target: { route: ToolRoute; args: Json } = { route, args };
       if (route.kind === "more_call") {
@@ -701,7 +701,7 @@ export class McpServer {
         }
         const resolved = resolveMoreCall(idx, more.app, args);
         target = resolved;
-        // spec 0.1.75 BRIDGE §7.5 rule (b): never run an inner op wider than the hints this session last LISTED for this
+        // spec 0.1.76 BRIDGE §7.5 rule (b): never run an inner op wider than the hints this session last LISTED for this
         // tb_more_call (a harness may auto-approve on readOnlyHint); the client re-lists and calls again
         const session = sessionId ? this.sessions.get(sessionId) : undefined;
         const why = session?.moreListed ? exceedsListed(session.moreListed.get(name), resolved.route.op.effect) : null;
@@ -736,7 +736,7 @@ export class McpServer {
       return { content: [{ type: "text", text }], structuredContent: { skillId, text } };
     }
     if (route.kind === "more_search") {
-      // spec 0.1.75 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
+      // spec 0.1.76 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
       const query = isRecord(args) && typeof args.query === "string" ? args.query : "";
       if (!query || query.length > 500) throw new BridgeError("input_invalid", 400, "query required (1–500 chars)");
       const limit = isRecord(args) && typeof args.limit === "number" ? Math.min(Math.max(1, Math.floor(args.limit)), 50) : 10;
@@ -785,12 +785,12 @@ export class McpServer {
 }
 
 /**
- * spec 0.1.75 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
+ * spec 0.1.76 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
  * route of the SAME app in this agent's index qualifies; anything else (unknown, not visible to this agent, another product,
  * a standard op, a dynamic op or entry, a `tb_*` tool) is `unknown_tool`, the answer for a name that does not exist.
  */
 /**
- * spec 0.1.75 BRIDGE §7.5 rule (b): does an op of `effect` exceed the `tb_more_call` hints a session was listed? Returns the
+ * spec 0.1.76 BRIDGE §7.5 rule (b): does an op of `effect` exceed the `tb_more_call` hints a session was listed? Returns the
  * listed hint it breaks, or null. Not listed at all in a session that has listed tools = exceeds (the client saw no hints).
  */
 export function exceedsListed(listed: ToolDef["annotations"] | undefined, effect: string): string | null {

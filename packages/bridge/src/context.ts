@@ -66,15 +66,15 @@ export interface BridgeOptions {
   viewsUrl?: string | undefined;
   /** BSD-08: Portal Root Keys; default = this build's channel. Only a test harness replaces them (start option). */
   portalRoots?: Ed25519PublicJwk[];
-  /** spec 0.1.75 BRIDGE §7.5 test harness only: run the lazy-tools path although the pinned validator predates it ({@link LAZY_TOOLS_PINNED}) */
+  /** spec 0.1.76 BRIDGE §7.5 test harness only: run the lazy-tools path although the pinned validator predates it ({@link LAZY_TOOLS_PINNED}) */
   lazyTools?: boolean;
   fetch?: typeof fetch;
 }
 
 /**
- * Spec 0.1.75 (C330(1), M4b, C354 capability gating): this build serves `listing: "lazy"` (BRIDGE §7.5) only when its pinned
+ * Spec 0.1.76 (C330(1), M4b, C354 capability gating): this build serves `listing: "lazy"` (BRIDGE §7.5) only when its pinned
  * vocabulary knows the value, i.e. its validator accepts it. Otherwise a manifest with a lazy op is refused at fetch
- * (`bridge_cap_missing`) and never registered half-working. The pin bump to spec >= 0.1.75 makes this true and declares the
+ * (`bridge_cap_missing`) and never registered half-working. The pin bump to spec >= 0.1.76 makes this true and declares the
  * `lazy_tools` cap in the same change (caps.ts); until then this bridge never declares it.
  */
 export const LAZY_TOOLS_PINNED: boolean = (OPERATION_LISTINGS as readonly string[]).includes("lazy");

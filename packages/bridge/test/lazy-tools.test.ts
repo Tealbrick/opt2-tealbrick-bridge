@@ -1,11 +1,11 @@
 /**
- * Spec 0.1.75 (C330(1), M4b; BRIDGE §7.5, MANIFEST §5.5): `operations[].listing: "lazy"`. A lazy op is visible and callable
+ * Spec 0.1.76 (C330(1), M4b; BRIDGE §7.5, MANIFEST §5.5): `operations[].listing: "lazy"`. A lazy op is visible and callable
  * exactly as a listed one, but tools/list leaves it out; per product the agent gets `<product>__tb_more_search` (answered by
  * the bridge from the agent's own index) and `<product>__tb_more_call` (resolved to the op's own route, then the direct call).
  *
  * The pinned validator (manifest 0.1.30, spec 0.1.57) refuses `listing: "lazy"` (`schema_invalid`), so the end-to-end tests
  * run in the test-double world; the real-crypto world runs them as soon as the pinned validator accepts the value (pin bump
- * to spec >= 0.1.75), and says so while it does not. Mirrors conformance B30.*.
+ * to spec >= 0.1.76), and says so while it does not. Mirrors conformance B30.*.
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -63,7 +63,7 @@ const realAccepts = (): boolean => {
 };
 
 for (const real of [false, true]) {
-  const skip = real && !realAccepts() ? "the pinned validator (manifest 0.1.30 / spec 0.1.57) refuses listing lazy; runs after the pin bump to spec >= 0.1.75" : false;
+  const skip = real && !realAccepts() ? "the pinned validator (manifest 0.1.30 / spec 0.1.57) refuses listing lazy; runs after the pin bump to spec >= 0.1.76" : false;
   describe(`listing: "lazy" (${real ? "real manifest crypto" : "test double"})`, { skip }, () => {
     let w: World;
     before(async () => {
@@ -212,7 +212,7 @@ for (const real of [false, true]) {
   });
 }
 
-// QA-BRIDGE20-1/-2/-3 (spec 0.1.75 review): annotations over every op tb_more_call reaches, tb_* catalog entries, refresh-on-miss
+// QA-BRIDGE20-1/-2/-3 (spec 0.1.76 review): annotations over every op tb_more_call reaches, tb_* catalog entries, refresh-on-miss
 const { input: _dIn, output: _dOut, ...engineBase } = archive;
 const qaManifest = {
   ...notesManifest,
