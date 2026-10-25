@@ -23,6 +23,7 @@
  * hint only, never an authority: the person-op relay forwards only to an app whose stored caps list `person_op` (fail closed).
  * A value that is not an array of strings within the limits is NO caps; unknown entries are ignored.
  */
+import { APP_CAPS, APP_CAPS_LIMITS } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Table } from "./table.ts";
 
@@ -36,10 +37,9 @@ export function knownProofClaims(v: unknown): ReadonlySet<string> {
   return out;
 }
 
-/** spec 0.1.70 `APP_CAPS` / `APP_CAPS_LIMITS` (bridge.ts); the same values here while the bridge pins spec 0.1.64 */
-const KNOWN_APP_CAPS: readonly string[] = ["person_op"];
-const APP_CAPS_MAX_ENTRIES = 16;
-const APP_CAPS_MAX_LENGTH = 32;
+const KNOWN_APP_CAPS: readonly string[] = APP_CAPS;
+const APP_CAPS_MAX_ENTRIES: number = APP_CAPS_LIMITS.maxEntries;
+const APP_CAPS_MAX_LENGTH: number = APP_CAPS_LIMITS.maxLength;
 
 /** the known entries of a claim/push `caps` member; a non-array, a non-string entry, over 16 entries or an entry over 32 chars: none */
 export function knownAppCaps(v: unknown): ReadonlySet<string> {

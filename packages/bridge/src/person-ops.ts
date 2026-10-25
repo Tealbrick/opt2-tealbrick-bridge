@@ -12,6 +12,7 @@
  * - No retries of the forward (one pop = at most one request to the app); the result post is retried once on a network error.
  * - Pause does not stop the relay (owner access by design, like person launch). Logs: pop, ins, op, status, ms only.
  */
+import { type APP_CAPS, PERSON_OP_BRIDGE_REFUSALS } from "@opt2-tealbrick/spec/bridge";
 import { type BridgePersonOp, type BridgePersonOpResultInput, PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import { isPreConnect } from "./calls.ts";
 import type { BridgeContext } from "./context.ts";
@@ -31,9 +32,9 @@ const RESULT_TIMEOUT_MS = 5_000;
 /** pops already handled (memory): a row handed out twice is never forwarded twice */
 const SEEN_MAX = 512;
 
-/** spec 0.1.70 `PERSON_OP_BRIDGE_REFUSALS` (bridge.ts) and app cap `person_op` (`APP_CAPS`); literals while the pin is 0.1.64 */
-const REFUSED = { instanceUnknown: "instance_unknown", appUnsupported: "person_op_unsupported" } as const;
-const APP_CAP_PERSON_OP = "person_op";
+/** spec 0.1.70 (C354): the fixed refusals, and the app cap that allows a forward */
+const REFUSED = PERSON_OP_BRIDGE_REFUSALS;
+const APP_CAP_PERSON_OP: (typeof APP_CAPS)[number] = "person_op";
 const refusal = (code: string, message: string) => ({ status: 409, body: JSON.stringify({ error: { code, message } }) });
 
 const POP_ID = /^pop_[0-9A-Za-z]{1,64}$/;
