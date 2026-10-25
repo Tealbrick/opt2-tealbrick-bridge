@@ -644,7 +644,7 @@ export class McpServer {
         }
         throw new BridgeError("unknown_tool", 404);
       }
-      // spec 0.1.66 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
+      // spec 0.1.71 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
       // call then IS that op's direct call (input = `arguments`; key, gate, hooks, proof, holds and receipts name the op)
       let target: { route: ToolRoute; args: Json } = { route, args };
       if (route.kind === "more_call") {
@@ -684,7 +684,7 @@ export class McpServer {
       return { content: [{ type: "text", text }], structuredContent: { skillId, text } };
     }
     if (route.kind === "more_search") {
-      // spec 0.1.66 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
+      // spec 0.1.71 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
       const query = isRecord(args) && typeof args.query === "string" ? args.query : "";
       if (!query || query.length > 500) throw new BridgeError("input_invalid", 400, "query required (1–500 chars)");
       const limit = isRecord(args) && typeof args.limit === "number" ? Math.min(Math.max(1, Math.floor(args.limit)), 50) : 10;
@@ -733,7 +733,7 @@ export class McpServer {
 }
 
 /**
- * spec 0.1.66 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
+ * spec 0.1.71 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
  * route of the SAME app in this agent's index qualifies; anything else (unknown, not visible to this agent, another product,
  * a standard op, a dynamic op or entry, a `tb_*` tool) is `unknown_tool`, the answer for a name that does not exist.
  */
