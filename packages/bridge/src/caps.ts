@@ -17,7 +17,7 @@
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  *    Reported only while the event log is available ({@link bridgeCaps}).
- *  - `hook_tool` (spec 0.1.68, bridge 0.2.8, BRIDGE v0.1.68) = on all three dynamic call paths (a listed entry, `<op>_call`,
+ *  - `hook_tool` (spec 0.1.68, bridge 0.2.9, BRIDGE v0.1.68) = on all three dynamic call paths (a listed entry, `<op>_call`,
  *    the relay's dynamic call; all through calls.ts `route`) the hook `call.target.tool` is the resolution's canonical tool
  *    with its crud/effect/holdFamily, absent for static ops; a resolution whose tool differs from the requested name or is not
  *    `^[a-z][a-z0-9_]{1,62}$` is refused `dynamic_resolve_failed` (calls.ts `resolve`, `effectiveOp`).

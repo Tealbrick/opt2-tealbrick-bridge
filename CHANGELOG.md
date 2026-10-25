@@ -2,7 +2,7 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
-## 0.2.8 — hook target tool, secretOutput ops; cap `hook_tool` (C336 RQ-2, RQ-3; spec 0.1.68, specs#47)
+## 0.2.9 — hook target tool, secretOutput ops; cap `hook_tool` (C336 RQ-2, RQ-3; spec 0.1.68, specs#47)
 
 - **Hook target `tool` (BRIDGE §8.2 v0.1.68, cap `hook_tool`).** On all three dynamic call paths (a listed dynamic entry and `<op>_call` over MCP, the relay's dynamic call, a companion call of a dynamic op on the internal listener; all through `CallRouter.route`) every hook request (before, context, after) carries `call.target.tool` = `DynamicResolution.tool`, the app's canonical resolution, with `crud` / `effect` / `holdFamily` from that resolution. Absent for static ops; dynamic search never routes a call. A resolution whose `tool` is not EXACTLY the requested name, or does not match `^[a-z][a-z0-9_]{1,62}$` (a catalog name of at most 48 chars, or a variant the agent requests itself such as `<tool>__first_contact`, at most 63), is refused 403 `dynamic_resolve_failed` (`details.reason: "tool_mismatch"`, not cached) before any hook runs: a case, space or alias variant is never mapped onto a held tool.
 - **`secretOutput` ops (MANIFEST M-OP-12, cap `secret_output`).** The op is never listed for agents (`visibleOps`), an agent call is refused 403 `secret_output_app_only` before anything runs, and for an app caller the bridge calls no `after` hook, forwards no idempotency key (the app keeps no row) and returns the result to the calling app only. Logs and status fields carry ids, codes and digests only, as for every call.
@@ -10,6 +10,14 @@ One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release 
 - **Compatibility.** A dynamic engine whose resolved tool names are not canonical (upper case, `-`, longer than 63 characters) or whose `resolve` answers any name other than the one requested is refused from this version on. Requested names of 49–63 chars pass the bridge's input check only after it re-pins a manifest whose `DYNAMIC_CALL_INPUT_SCHEMA` allows them (sdk#51).
 - The spec 0.1.68 fields are read structurally (`// spec 0.1.68`): pins stay spec 0.1.57 / manifest 0.1.30 until spec 0.1.68 and manifest 0.1.31 are released. Until the manifest re-pin, this bridge's validator refuses a manifest that declares `secretOutput` (fail closed). Such a manifest lists `requires.bridgeCaps: ["secret_output"]` (C354); Core deploys it only onto a bridge that declares the cap.
 - Tests: `packages/bridge/test/c336-hook-tool-secret.test.ts` (B29.hook_target_tool_list / _call / _relay, B29.hook_tool_bypass, 49- and 63-char names equal to the request pass, a differing resolution (also `<requested>__<suffix>`) and 64 chars are refused; the 63-char full MCP path runs after the manifest re-pin (skipped until then: the pinned validator refuses requests over 48 chars), C-SO-1/2 bridge part, with positive controls) and the `hook_tool` cap probe.
+- Version: 0.2.9 is the next free version after bridge#27 took 0.2.8 (C354a); provisional, assigned at merge (C352).
+
+## 0.2.8 — patch: an unparseable request target is a 400 (C358; SECURITY; spec 0.1.57, manifest 0.1.30, conformance 0.1.28 unchanged)
+
+- **Fix (bridge#21):** a request whose target cannot be parsed as a URL (for example `GET //`) crashed the process; it is now answered with a 400 and the bridge keeps running. A new test (`test/bad-target.test.ts`) covers it.
+- **Build (bridge#19):** Node 24.22.1 base image (Node.js security release 2026-10-21).
+- **Tests only (bridge#18):** the key page replaces a key that is already set (no code change).
+- No other behaviour change, no new dependency, no state migration. The per-app event share planned for 0.2.8 (C274f) moves to 0.2.9 (C358).
 
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 

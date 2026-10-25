@@ -1,5 +1,5 @@
 /**
- * Bridge 0.2.8 / spec 0.1.68 (C336 RQ-2, RQ-3; BRIDGE v0.1.68, caps `hook_tool` and `secret_output`; CONFORMANCE v0.1.68 rows):
+ * Bridge 0.2.9 / spec 0.1.68 (C336 RQ-2, RQ-3; BRIDGE v0.1.68, cap `hook_tool`; CONFORMANCE v0.1.68 rows):
  * - B29.hook_target_tool_list / _call / _relay: on each dynamic path (a listed entry and `<op>_call` over MCP, a companion
  *   call of a dynamic op on the internal listener) every hook request carries `call.target.tool` = the resolution's canonical
  *   tool and its crud/effect/holdFamily; a static op carries no `tool`. A resolution that names another tool, or a malformed
