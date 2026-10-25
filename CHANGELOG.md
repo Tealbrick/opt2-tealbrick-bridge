@@ -4,7 +4,7 @@ One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release 
 
 ## 0.2.9 — model roles and agent persona (C330(4), C322(3), C320, C312a; spec 0.1.71)
 
-(0.2.8 is the patch release of bridge#27; this line was built as "0.2.8" during review and is released as 0.2.9.)
+(0.2.8, below, is the patch release of bridge#27; this line was built as "0.2.8" during review and is released as 0.2.9.)
 
 - **Cap** `model_roles` in `StatusReport.bridge.caps` (and in re-minted standalone slices): this build implements all of BRIDGE §15 (probe in `caps.test.ts`). Core sends `agents[].persona` and `modelRoleRequirements[]` only to a bridge that declares it.
 
@@ -19,6 +19,13 @@ One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release 
 - Pins `@opt2-tealbrick/spec` 0.1.71 (dist release `opt2-tealbrick-specs-spec-v0.1.71`, integrity in the lockfile; the relay keeps its own 0.1.57 through the existing override). Every §15 shape and constant (`MODEL_PROVIDERS` with `gateway`, `NEVER_LOCAL`, `NEVER_LOCAL_HOSTNAMES`, `OWN_HOSTS_MAX`, `POLICY_BASES`, `PERSONA_PATTERN`, `PERSONA_MARKERS`, `ModelRoleStatus.policyBasis`) is imported from the package; there is no local mirror.
 - Known gap: `@opt2-tealbrick/manifest` 0.1.30 checks K11 claims as a closed set, so a keys ticket that carries `roles[]` is refused until the manifest package adds the claim; the hint code path is tested below the ticket.
 - Tests: `model-roles.test.ts` (RM-2 incl. the 9 policy pairs, RM-3 positives and negatives, RM-4..RM-6, RM-12, bridge half of RM-13 with the spec canaries), `persona.test.ts` (RM-7 incl. 8,000/8,001), `caps.test.ts` probe for `model_roles`, `kek-rotation.test.ts` covers the new record.
+
+## 0.2.8 — patch: an unparseable request target is a 400 (C358; SECURITY; spec 0.1.57, manifest 0.1.30, conformance 0.1.28 unchanged)
+
+- **Fix (bridge#21):** a request whose target cannot be parsed as a URL (for example `GET //`) crashed the process; it is now answered with a 400 and the bridge keeps running. A new test (`test/bad-target.test.ts`) covers it.
+- **Build (bridge#19):** Node 24.22.1 base image (Node.js security release 2026-10-21).
+- **Tests only (bridge#18):** the key page replaces a key that is already set (no code change).
+- No other behaviour change, no new dependency, no state migration. The per-app event share planned for 0.2.8 (C274f) moves to 0.2.9 (C358).
 
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
