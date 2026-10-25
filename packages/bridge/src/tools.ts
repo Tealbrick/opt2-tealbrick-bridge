@@ -58,8 +58,6 @@ export const MORE_CALL_OP: string = RULE_066.moreCallOp ?? "tb_more_call";
 /** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.76, M-OP-13; tolerated here: listed) */
 export const isLazyOp = (op: OperationView): boolean => !op.standard && !op.dynamic && (op.listing as string | undefined) === "lazy";
 const MORE_HINT_IDS = 5;
-/** MANIFEST M-OP-13: does the manifest use `listing: "lazy"` on any op? (a bridge without `lazy_tools` refuses it) */
-export const hasLazyOp = (m: { operations: readonly { listing?: unknown }[] }): boolean => m.operations.some((o) => o.listing === "lazy");
 const SEARCH_SCHEMA: JsonSchemaObject = {
   type: "object",
   additionalProperties: false,
@@ -125,10 +123,21 @@ const subset = (a: readonly string[], b: readonly string[]) => a.every((x) => b.
  * widened to all actions, so audience, declared scope type and workflow are never copied here. DISPLAY only: the SDK
  * authorizes every call with the app's own access (`authority = owner`) or refuses `scope_denied`.
  */
+/**
+ * spec 0.1.68 (C336 RQ-3, S-8; MANIFEST M-OP-12, BRIDGE v0.1.68, cap `secret_output`): the op's output carries a secret. The
+ * bridge never lists it for agents and refuses an agent call (`secret_output_app_only`); for an app caller it forwards the
+ * result to that caller only: no `after` hook, no idempotency key forwarded (the app keeps no row), never logged. Read
+ * structurally (`// spec 0.1.68`) until the spec pin carries `Operation.secretOutput`.
+ */
+export function isSecretOutputOp(op: OperationView): boolean {
+  return !op.standard && (op as { secretOutput?: unknown }).secretOutput === true;
+}
+
 export function visibleOps(ctx: Pick<BridgeContext, "api">, app: AppRuntime, grant: GrantClaims, admitted?: ReadonlySet<string>): OperationView[] {
   const out: OperationView[] = [];
   for (const op of app.ops.values()) {
     if (op.standard) continue; // tb.hold_status / tb.holds_pending are added per product separately
+    if (isSecretOutputOp(op)) continue; // spec 0.1.68: app callers only, never an agent tool
     if (ctx.api.opVisibleToGrant(op, grant, app.scopeTypes)) out.push(op);
     else if (admitted?.has(op.id) && op.scopeType !== undefined && !op.dynamic && ctx.api.opVisibleToGrant(op, { mode: grant.mode, wf: grant.wf, crud: CRUD_ACTIONS }, app.scopeTypes)) out.push(op);
   }

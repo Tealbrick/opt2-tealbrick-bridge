@@ -9,6 +9,8 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { after, before, describe, test } from "node:test";
+import { bridgeCaps, declaredCaps, missingBridgeCap } from "../src/caps.ts";
+import { LAZY_TOOLS_PINNED } from "../src/context.ts";
 import { freePort } from "./support/sdk-app.ts";
 import { AGT, BRG, HOOKINS, hookManifest, INS, makeWorld, notesManifest, type World, WS, waitFor } from "./support/world.ts";
 
@@ -207,3 +209,13 @@ for (const lazyTools of [false, true]) {
     });
   });
 }
+
+test("C354 one switch: lazy_tools is reported and accepted exactly when the bridge serves lazy tools; a lazy op implies it", () => {
+  const lazyManifest = { operations: [{ id: "a", listing: "lazy" }] };
+  assert.ok(!bridgeCaps({ events: { available: true } }).includes("lazy_tools" as never), "default build (pin predates lazy): not reported");
+  assert.ok(bridgeCaps({ events: { available: true }, lazyTools: true }).includes("lazy_tools" as never), "serving lazy tools → reported");
+  assert.equal(missingBridgeCap(lazyManifest, {}, declaredCaps({ lazyTools: false })), "lazy_tools", "a lazy op implies lazy_tools");
+  assert.equal(missingBridgeCap(lazyManifest, {}, declaredCaps({ lazyTools: true })), undefined);
+  assert.equal(missingBridgeCap({ operations: [{ id: "a" }] }, {}, declaredCaps({ lazyTools: false })), undefined, "no lazy op → no requirement");
+  assert.equal(LAZY_TOOLS_PINNED, false, "this pin (spec 0.1.71) predates lazy; the pin bump flips it");
+});

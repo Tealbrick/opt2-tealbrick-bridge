@@ -9,13 +9,12 @@ import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConf
 import { type ConnectionId, LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
-import { bridgeCaps } from "./caps.ts";
+import { bridgeCaps, declaredCaps, missingBridgeCap } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { roleStatuses } from "./model-roles.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { acceptedDigests, buildTable, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
-import { hasLazyOp } from "./tools.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
@@ -170,9 +169,12 @@ export function startManifestRetry(ctx: BridgeContext, signal: AbortSignal): voi
 
 export class ManifestError extends Error {
   readonly served: string | undefined;
-  constructor(code: string, served?: string) {
+  /** extra reason detail for the rejection log line (e.g. the missing bridge cap); ids and codes only */
+  readonly detail: string | undefined;
+  constructor(code: string, served?: string, detail?: string) {
     super(code);
     this.served = served;
+    this.detail = detail;
   }
 }
 
@@ -181,7 +183,7 @@ export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown
   const mismatch = e instanceof ManifestError && e.message === "manifest_mismatch";
   // v0.1.18 (spec 0.1.17, L3, C104): a manifest the bridge REFUSED is reported (Core shows the reason instead of "starting");
   // a transient fetch failure (HTTP status, network) is not a refusal
-  if (e instanceof ManifestError && !e.message.startsWith("fetch_")) ctx.reject({ kind: "manifest", code: e.message, ins: app.ins, detail: app.product });
+  if (e instanceof ManifestError && !e.message.startsWith("fetch_")) ctx.reject({ kind: "manifest", code: e.message, ins: app.ins, detail: e.detail ? `${app.product}: ${e.detail}` : app.product });
   ctx.log.warn("bridge.manifest.unavailable", {
     ins: app.ins,
     product: app.product,
@@ -198,11 +200,13 @@ export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Prom
   const v = ctx.api.validateManifest(await res.json());
   // the validator's own code (e.g. dynamic_invalid), so Core can say why (L3)
   if (!v.ok) throw new ManifestError(v.errors[0]?.code ?? "manifest_invalid");
-  // spec 0.1.76 (C354, MANIFEST M-OP-13): a manifest with a lazy op needs a bridge with `lazy_tools`; without it, refuse here
-  if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new ManifestError("bridge_cap_missing");
   // C104: an app that needs a newer bridge is refused here, never routed half-working
   const need = ctx.api.requiredBridgeVersion(v.manifest).bridge;
   if (need && ctx.api.compareSemver(need, BRIDGE_VERSION) > 0) throw new ManifestError("bridge_too_old");
+  // spec 0.1.68 (C354): an app whose requires.bridgeCaps (or a feature it uses) names a cap this bridge does not declare is
+  // refused here, before it is routed (Core refuses such a deploy too; this is the bridge's own check)
+  const missing = missingBridgeCap(v.manifest, ctx.api, declaredCaps(ctx));
+  if (missing) throw new ManifestError("bridge_cap_missing", undefined, `missing bridge cap ${missing}`);
   return v.manifest;
 }
 

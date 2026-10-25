@@ -1,6 +1,7 @@
 /**
  * Bridge 0.2.5 (spec 0.1.54, C292 / C292a): `StatusReport.bridge.caps`. The bridge declares ONLY what it implements:
- * `owner_rows` = the C283 A1 owner-row filter; `events` (bridge 0.2.7, spec 0.1.57) = all of BRIDGE §14 (app events). Core copies the set into the slices; a standalone bridge writes it into
+ * `owner_rows` = the C283 A1 owner-row filter; `events` (bridge 0.2.7, spec 0.1.57) = all of BRIDGE §14 (app events); `hook_tool`
+ * (spec 0.1.68) = BRIDGE v0.1.68 hook target tool. `secret_output` waits for the manifest re-pin (C354). Core copies the set into the slices; a standalone bridge writes it into
  * the slices it re-mints itself. Caps are advisory and never widen access.
  *
  * The cap list is a constant in caps.ts, tied to its feature by a probe per entry (below): a cap whose behaviour is
@@ -13,18 +14,34 @@ import { readdirSync, readFileSync } from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { BRIDGE_CAPS } from "@opt2-tealbrick/spec/bridge";
+import { CallRouter } from "../src/calls.ts";
 import { BRIDGE_CAPS_DECLARED } from "../src/caps.ts";
 import { buildStatusReport } from "../src/portal.ts";
 import { trustFor } from "../src/table.ts";
 import { visibleOps } from "../src/tools.ts";
-import { AGT, BRG, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
+import { AGT, BRG, CON, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
 
 /** one probe per cap: true when the build really has the behaviour the cap names */
 const PROBES: Record<string, (w: World) => Promise<void>> = {
-  // BRIDGE §14: the ingest route answers (an unauthenticated batch is refused 401, not 404), the event log is open, and the
-  // three methods answer on an MCP session (not -32601); the full behaviour is events-store.test.ts and events-e2e.test.ts
+  // spec 0.1.68 (BRIDGE v0.1.68): a dynamic call whose resolution names another tool is refused; the canonical one runs. The
+  // hook `target.tool` on all three paths is c336-hook-tool-secret.test.ts (B29.*)
+  hook_tool: async (w) => {
+    const app = w.bridge.ctx.table?.apps.get(INS as never);
+    const op = app?.ops.get("notes_list");
+    assert.ok(app && op);
+    const dyn = { ...op, dynamic: { mode: "list", crudCeiling: ["read"], effectCeiling: "read" } } as never;
+    const router = new CallRouter(w.bridge.ctx);
+    const call = (tool: string) => router.route({ caller: { type: "agent", agt: AGT as never, con: CON as never }, target: { app, op: dyn, tool }, input: { tool, arguments: {} } as never });
+    w.bridgeOps.answer = (path, body) => (path === "resolve" ? { tool: String(body.tool).toLowerCase(), crud: ["read"], effect: "read" } : undefined);
+    try {
+      await assert.rejects(call("Probe_Tool"), (e: unknown) => (e as { code?: string }).code === "dynamic_resolve_failed");
+      assert.equal((await call("probe_tool")).result.status, "ok");
+    } finally {
+      w.bridgeOps.answer = undefined;
+    }
+  },
   events: async (w) => {
     assert.ok(w.bridge.ctx.events, "the event log is open");
     const r = await fetch(`${w.internalUrl}/tb/v1/events`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [] }) });
@@ -79,9 +96,12 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.close();
   });
 
-  test("the bridge declares exactly owner_rows, events and model_roles, and only values the spec knows", () => {
-    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles"]);
-    for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
+  test("the bridge declares exactly owner_rows, events, model_roles and hook_tool (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
+    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool"]);
+    // spec 0.1.68 adds hook_tool to BRIDGE_CAPS; the pinned spec predates it (drop this list at the re-pin)
+    assert.equal((BRIDGE_CAPS_DECLARED as readonly string[]).includes("secret_output"), false, "C354: not before the bridge pins a validator that accepts secretOutput");
+    const SPEC_0_1_68 = ["hook_tool"];
+    for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c) || SPEC_0_1_68.includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 
   test("every status report carries the caps: the ones Portal received and a freshly built one", async () => {
@@ -89,11 +109,11 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.publish();
     await waitFor(() => w.acks.some((a) => a.rev === w.rev()), 15000);
     assert.ok(w.acks.length >= 2, `reports received: ${w.acks.length}`);
-    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles"], `report rev ${a.rev}`);
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles"]);
+    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool"], `report rev ${a.rev}`);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool"]);
     // a copy: changing a report never changes what the next one says
     (buildStatusReport(w.bridge.ctx).bridge.caps as string[]).push("x");
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles"]);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool"]);
   });
 
   test("every declared cap has a probe, and the probe passes (the behaviour the cap names exists in this build)", async () => {
@@ -105,7 +125,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "caps.ts")) {
       const text = readFileSync(`${dir}${f}`, "utf8");
-      assert.ok(!/["'](owner_rows|events|model_roles)["']/.test(text), `${f} must take the caps from caps.ts`);
+      assert.ok(!/["'](owner_rows|events|model_roles|hook_tool|secret_output)["']/.test(text), `${f} must take the caps from caps.ts`);
     }
   });
 });
@@ -140,7 +160,7 @@ describe("standalone bridge: slice.bridge.caps from its own set (spec 0.1.54)", 
     await waitFor(() => w.bridge.ctx.table?.standalone === true && w.bridge.ctx.table?.config.iss === w.bridge.ctx.bridgeRef, 15000);
     const slice = w.bridge.ctx.table?.config.apps.find((a) => a.ins === INS)?.slice as string;
     const claims = JSON.parse(Buffer.from(slice.split(".")[1] as string, "base64url").toString("utf8")) as { bridge?: { id?: string; keys?: unknown[]; caps?: string[] } };
-    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles"]);
+    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool"]);
     assert.equal(claims.bridge?.id, BRG, "the rest of the bridge member is kept");
     assert.equal(claims.bridge?.keys?.length, 1);
   });

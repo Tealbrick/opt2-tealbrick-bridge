@@ -14,6 +14,7 @@ import type { ErrorCode } from "@opt2-tealbrick/spec/routes";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
+import { declaredCaps, missingBridgeCap } from "./caps.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { resolveForCaller } from "./model-roles.ts";
@@ -21,7 +22,6 @@ import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
-import { hasLazyOp } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
@@ -206,8 +206,9 @@ export class InternalApi {
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
-      // spec 0.1.76 (C354, MANIFEST M-OP-13): no lazy registration without `lazy_tools`
-      if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new BridgeError("bridge_cap_missing", 409, "this bridge does not declare lazy_tools", { cap: "lazy_tools" });
+      // spec 0.1.68 (C354): the same capability check as an app's manifest fetch (portal.ts fetchManifestFrom)
+      const missing = missingBridgeCap(v.manifest, ctx.api, declaredCaps(ctx));
+      if (missing) throw new BridgeError("bridge_cap_missing", 409, `this bridge does not declare the capability ${missing}`, { cap: missing });
       manifest = v.manifest;
     } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {
       // G2b: the claim may carry the serving digest or, mid-attempt, the candidate digest; anything else is refused
