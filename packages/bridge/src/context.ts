@@ -9,11 +9,10 @@ import { readFileSync } from "node:fs";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
-import { PERSONA_MAX_CHARS } from "@opt2-tealbrick/spec/models";
+import { PERSONA_MAX_CHARS, PERSONA_PATTERN } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
-import { PERSONA_PATTERN } from "./spec-followup.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -25,7 +24,7 @@ export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../packa
 export const DRAIN_RETRY_AFTER_S = 2;
 /** spec 0.1.63 (bridge.ts `rejected` doc, BRIDGE §15.6): kind `config` + this code = a persona over PERSONA_MAX_CHARS, dropped */
 export const PERSONA_TOO_LONG = "persona_too_long";
-/** spec follow-up #49 (QA-SPEC49-14): kind `config` + this code = a persona that does not match PERSONA_PATTERN, dropped */
+/** spec 0.1.68 (QA-SPEC49-14, C353): kind `config` + this code = a persona that does not match PERSONA_PATTERN, dropped */
 export const PERSONA_INVALID = "persona_invalid";
 /** unicode mode: a surrogate PAIR (an emoji) is one code point and never matches the lone-surrogate range */
 const PERSONA_RE = new RegExp(PERSONA_PATTERN, "u");

@@ -7,13 +7,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, before, describe, test } from "node:test";
-import type { ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
-import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy } from "@opt2-tealbrick/spec/models";
+import type { ModelRoleRequirementEntry, StatusReport } from "@opt2-tealbrick/spec/bridge";
+import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_PROVIDERS, NEVER_LOCAL, NEVER_LOCAL_HOSTNAMES } from "@opt2-tealbrick/spec/models";
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
 import { classifyBase, classifyOwnHost, effectiveGateway, effectivePolicy, resolveForCaller } from "../src/model-roles.ts";
 import { hintsFrom, renderModels } from "../src/models-page.ts";
 import { buildStatusReport } from "../src/portal.ts";
-import { MODEL_PROVIDERS, NEVER_LOCAL, NEVER_LOCAL_HOSTNAMES, type StatusReportFollowup } from "../src/spec-followup.ts";
 import type { ModelBinding } from "../src/state.ts";
 import { BRG, HOOKINS, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
 
@@ -123,7 +122,7 @@ describe("BRIDGE §15.3 local check (RM-3, unit; spec follow-up #49)", () => {
     assert.ok("refused" in classifyOwnHost(`https://${CGNAT_TOP}/v1`), "no path");
   });
 
-  test("NEVER_LOCAL and NEVER_LOCAL_HOSTNAMES mirror the spec follow-up exactly", () => {
+  test("NEVER_LOCAL, NEVER_LOCAL_HOSTNAMES and the gateway rows are the spec 0.1.68 values", () => {
     assert.deepEqual([...NEVER_LOCAL], ["169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128", `${METADATA_CGNAT}/32`, "192.0.0.192/32", "168.63.129.16/32", "0.0.0.0/8", "::/128"]);
     assert.deepEqual([...NEVER_LOCAL_HOSTNAMES], ["metadata.google.internal", "metadata.goog", "metadata"]);
     assert.deepEqual(MODEL_PROVIDERS.filter((p) => p.gateway).map((p) => p.id), ["openrouter", "litellm", "openai-compatible"]);
@@ -366,7 +365,7 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
   });
 
   test("RM-5 / RM-13 (bridge half): status roles[] are labels only; no base URL, key name or value in reports or logs", async () => {
-    const report = buildStatusReport(w.bridge.ctx) as StatusReportFollowup;
+    const report = buildStatusReport(w.bridge.ctx) as StatusReport;
     assert.equal(report.roles?.length, REQS.length);
     // schema model-role-status.schema.json#/$defs/modelRoleStatus: exactly these keys, labels of the spec patterns or null
     for (const row of report.roles ?? []) {
@@ -383,7 +382,7 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     assert.deepEqual(row("embeddings"), { role: "embeddings", ins: INS, set: true, policyOk: true, provider: "ollama", model: "bge-m3", dataPolicy: "local", policyBasis: "verified" });
     assert.deepEqual(row("dreaming"), { role: "dreaming", ins: INS, set: false, policyOk: false, provider: null, model: null, dataPolicy: null }, "its key was deleted");
     assert.equal(row("reasoning", HOOKINS)?.set, true);
-    await waitFor(() => (w.acks as StatusReportFollowup[]).some((a) => a.roles?.some((r) => r.role === "embeddings" && r.model === "bge-m3")), 15000);
+    await waitFor(() => (w.acks as StatusReport[]).some((a) => a.roles?.some((r) => r.role === "embeddings" && r.model === "bge-m3")), 15000);
     const seen = JSON.stringify(w.acks) + JSON.stringify(report) + JSON.stringify(lines);
     for (const leak of ["10.20.30.40", "sk-rm-", "sk-ant-rm", "sk-notes-rm", "OpenAI main", "Anthropic main", "api.openai.com"]) assert.ok(!seen.includes(leak), `${leak} must not reach Portal or the log`);
     assert.ok(lines.some((l) => l.e === "bridge.models.bound"), "binding changes are logged (labels only)");
@@ -476,7 +475,7 @@ describe("Keys and models: owner text is escaped; RM-13 canaries never leave the
     assert.equal((await h.post({ action: "pkey", label: CANARY.keyName, value: CANARY.value })).status, 303);
     assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai-compatible", model: "canary-model", baseUrl: CANARY.baseUrl, keyName: CANARY.keyName })).status, 303);
     assert.equal(w.bridge.ctx.state.bindings.find((b) => b.role === "utility")?.dataPolicy, "local");
-    await waitFor(() => (w.acks as StatusReportFollowup[]).some((a) => a.roles?.some((r) => r.model === "canary-model" && r.set)), 15000);
+    await waitFor(() => (w.acks as StatusReport[]).some((a) => a.roles?.some((r) => r.model === "canary-model" && r.set)), 15000);
     const seen = JSON.stringify(w.acks) + JSON.stringify(buildStatusReport(w.bridge.ctx)) + JSON.stringify(lines);
     for (const canary of [CANARY.baseUrl, "canary-url-7f3a", "10.9.8.7", CANARY.keyName, CANARY.value]) assert.ok(!seen.includes(canary), `${canary}: zero hits`);
     assert.ok(lines.length > 0, "the log was captured");
@@ -486,7 +485,7 @@ describe("Keys and models: owner text is escaped; RM-13 canaries never leave the
 describe("spec follow-up #49 on the page: Own hosts, gateway attestation, owner-attested labels (RM-3, RM-18)", () => {
   let w: World;
   const h = harness(() => w);
-  const report = () => buildStatusReport(w.bridge.ctx) as StatusReportFollowup;
+  const report = () => buildStatusReport(w.bridge.ctx) as StatusReport;
   const row = () => report().roles?.find((r) => r.role === "utility");
   const policy = () => row()?.dataPolicy;
   const stored = () => w.bridge.ctx.state.bindings.find((b) => b.role === "utility");

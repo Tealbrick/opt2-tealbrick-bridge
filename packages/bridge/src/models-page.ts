@@ -8,7 +8,7 @@
 import type { ServerResponse } from "node:http";
 import type { ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId, PersonTicketKeysClaims } from "@opt2-tealbrick/spec/credentials";
-import { DATA_POLICY_RANK, type DataPolicy, MODEL_ID_PATTERN, MODEL_ROLE_HINTS_MAX, MODEL_ROLES, type ModelRole } from "@opt2-tealbrick/spec/models";
+import { DATA_POLICY_RANK, type DataPolicy, MODEL_ID_PATTERN, MODEL_PROVIDERS, MODEL_ROLE_HINTS_MAX, MODEL_ROLES, type ModelRole, OWN_HOSTS_MAX, type PolicyBasis } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
 import {
   baseUrlOf,
@@ -28,7 +28,6 @@ import {
   servable,
 } from "./model-roles.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type PageApp, pageApp } from "./pages.ts";
-import { MODEL_PROVIDERS, OWN_HOSTS_MAX, type PolicyBasis } from "./spec-followup.ts";
 import type { ModelBinding } from "./state.ts";
 import type { Table } from "./table.ts";
 

@@ -5,11 +5,10 @@
  * stores, checks and hands over.
  */
 import { isIPv4, isIPv6 } from "node:net";
-import type { ModelRoleFetchResponse, ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
+import type { ModelRoleFetchResponse, ModelRoleRequirementEntry, ModelRoleStatus } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
-import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_ROLES, type ModelRole } from "@opt2-tealbrick/spec/models";
+import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_PROVIDERS, MODEL_ROLES, type ModelProvider, type ModelRole, NEVER_LOCAL_HOSTNAMES, type PolicyBasis } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
-import { MODEL_PROVIDERS, type ModelProvider, type ModelRoleStatus, NEVER_LOCAL_HOSTNAMES, type PolicyBasis } from "./spec-followup.ts";
 import type { ModelBinding } from "./state.ts";
 import type { Table } from "./table.ts";
 import { BridgeError } from "./util.ts";
