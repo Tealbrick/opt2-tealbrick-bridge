@@ -10,7 +10,8 @@
       "product": "bridge",
       "context": ".",
       "dockerfile": "packages/bridge-server/Dockerfile",
-      "kind": "bridge"
+      "kind": "bridge",
+      "upgradeFrom": "<=0.1.31"
     }
   ]
 }
