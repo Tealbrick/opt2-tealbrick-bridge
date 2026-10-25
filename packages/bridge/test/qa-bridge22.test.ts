@@ -88,6 +88,29 @@ describe("QA-BRIDGE22: provider keys in their own namespace, percent errors, zdr
     assert.equal(missing.json.error.code, "key_not_declared");
   });
 
+  test("QA-BRIDGE22-6: a config that lists `pk:openai-main` as an app key never exposes the provider key", async () => {
+    await open();
+    assert.equal((await post({ action: "pkey", label: "openai-main", value: "sk-provider-qa22-6" })).status, 303);
+    // a bad (or hostile) config: an account_default requirement named like a provider key, and other off-pattern names
+    await w.amend((c) => {
+      for (const name of ["pk:openai-main", "TB_SECRET", "lower_case"]) c.keyRequirements.push(appKeyReq(name));
+    });
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    for (const name of ["pk:openai-main", "TB_SECRET", "lower_case"]) {
+      const r = await internal(`/tb/v1/keys/${encodeURIComponent(name)}`);
+      assert.equal(r.status, 403, name);
+      assert.equal(r.json.error.code, "key_not_declared", `${name}: dropped from the requirement list`);
+      assert.ok(!JSON.stringify(r.json).includes("sk-provider-qa22-6"));
+    }
+    const html = await open();
+    assert.ok(!html.includes('id="k-pk:openai-main"') && !html.includes("App pk:openai-main"), "not listed as an app key");
+    assert.ok(!buildStatusReport(w.bridge.ctx).keys.some((k) => k.name === "pk:openai-main"), "not reported as an app key");
+    // the page cannot set or delete it as an app key either
+    assert.equal((await post({ name: "pk:openai-main", value: "overwrite" })).status, 400);
+    assert.equal((await post({ name: "pk:openai-main", action: "delete" })).status, 400);
+    assert.equal(store().values["pk:openai-main"], "sk-provider-qa22-6");
+  });
+
   test("S3 -2 / RM-25: authenticated first (401), then a malformed percent escape in the role or key path is 400 bad_request, never 500", async () => {
     for (const path of ["/tb/v1/model-roles/%", "/tb/v1/model-roles/%FF", "/tb/v1/model-roles/%E0%A4%A", "/tb/v1/keys/%", "/tb/v1/keys/%FF", "/tb/v1/keys/%E0%A4%A"]) {
       const r = await internal(path);

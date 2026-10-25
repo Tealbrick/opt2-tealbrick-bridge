@@ -5,7 +5,7 @@
 
 import type { ManifestApi } from "@opt2-tealbrick/relay";
 import { isRefusal } from "@opt2-tealbrick/relay";
-import type { AgentEntry, AppEntry, HookEntry, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
+import type { AgentEntry, AppEntry, HookEntry, KeyRequirementEntry, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import type {
   AgentId,
   BridgeId,
@@ -93,6 +93,18 @@ export interface Table {
 }
 
 /** Reads a compact JWS payload for indexing only; every use of a grant re-verifies it with `verifyGrant`. */
+/** The app-key (requirement) name shape: spec manifest.ts `EnvName` (a doc pattern there, no runtime constant). */
+export const APP_KEY_NAME = /^(?!TB_|RAILWAY_)[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * The config's key requirements the bridge acts on (QA-BRIDGE22-6): a name that is not an app-key name — e.g. `pk:…`, the
+ * provider-key namespace — is dropped even when a config lists it, so it can never be fetched, listed, set or reported
+ * as an app key.
+ */
+export function keyRequirements(t: Pick<Table, "config">): KeyRequirementEntry[] {
+  return t.config.keyRequirements.filter((r) => APP_KEY_NAME.test(r.name));
+}
+
 export function peekClaims<C>(token: string): C | undefined {
   const parts = token.split(".");
   if (parts.length !== 3 || !parts[1]) return undefined;

@@ -14,7 +14,7 @@ import { LIFETIME_S, type PersonTicketKeysClaims, type PersonTicketLaunchClaims,
 import type { BridgeContext } from "./context.ts";
 import { applyModelsPost, confirmPage, deleteQuestion, hintsFrom, type RoleHint, renderModels, renderOwnHosts, renderProviderKeys, servesText } from "./models-page.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
-import type { AppRuntime } from "./table.ts";
+import { type AppRuntime, keyRequirements } from "./table.ts";
 import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson, urlOf } from "./util.ts";
 
 const MAX_UI_BODY = 10 * 1024 * 1024;
@@ -294,11 +294,11 @@ export class PersonSurfaces {
         res.writeHead(303, { location: "/keys", "cache-control": "no-store" }).end();
         return;
       }
-      const allowed = t.config.keyRequirements.some((k) => k.source === "account_default" && k.name === name);
+      const allowed = keyRequirements(t).some((k) => k.source === "account_default" && k.name === name);
       if (!allowed) return refuse("unknown_key", name, 400, notSaved("no app requests this key."));
       if (form.get("action") === "delete") {
         // BRIDGE §15.2: a key that serves models is deleted only after the owner confirmed it
-        const label = t.config.keyRequirements.find((k) => k.name === name)?.label ?? name;
+        const label = keyRequirements(t).find((k) => k.name === name)?.label ?? name;
         const q = form.get("confirm") === "1" ? undefined : deleteQuestion(this.ctx, t, name, label, { name, action: "delete" });
         if (q?.kind === "confirm") return confirmPage(res, this.ctx, session.csrf, q);
         this.ctx.state.setKey(name, null);
@@ -327,7 +327,7 @@ export class PersonSurfaces {
   }
 
   private renderKeys(res: ServerResponse, t: NonNullable<BridgeContext["table"]>, session: KeySession, headers: Record<string, string> = {}): void {
-    const reqs = t.config.keyRequirements.filter((k) => k.source === "account_default");
+    const reqs = keyRequirements(t).filter((k) => k.source === "account_default");
     const byName = new Map<string, { label: string; provider?: string; products: Set<string>; required: boolean }>();
     for (const k of reqs) {
       const e = byName.get(k.name) ?? { label: k.label, ...(k.provider ? { provider: k.provider } : {}), products: new Set<string>(), required: false };
@@ -390,7 +390,7 @@ type KeySaveRefusal = "rate_limited" | "too_large" | "body_invalid" | "ticket_in
 /** the apps (product ids) that request this key; null when no app does */
 function keyApps(t: NonNullable<BridgeContext["table"]>, keyName: string | null): string | null {
   if (!keyName) return null;
-  const apps = [...new Set(t.config.keyRequirements.filter((k) => k.source === "account_default" && k.name === keyName).map((k) => k.product))].sort();
+  const apps = [...new Set(keyRequirements(t).filter((k) => k.source === "account_default" && k.name === keyName).map((k) => k.product))].sort();
   return apps.length ? apps.join(",") : null;
 }
 

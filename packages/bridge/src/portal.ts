@@ -14,7 +14,7 @@ import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { roleStatuses } from "./model-roles.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
+import { acceptedDigests, buildTable, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
@@ -405,7 +405,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       ...upgradeFields(h?.status),
     };
   });
-  const keys = (t?.config.keyRequirements ?? [])
+  const keys = (t ? keyRequirements(t) : [])
     .filter((k) => k.source === "account_default")
     .map((k) => ({ name: k.name, ins: k.ins, set: Object.hasOwn(ctx.state.keyStore.values, k.name) }));
   const connectionsCreated = [...ctx.state.connections.values()]

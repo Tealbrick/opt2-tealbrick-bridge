@@ -19,7 +19,7 @@ import { resolveForCaller } from "./model-roles.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
+import { type AppRuntime, acceptedDigests, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
@@ -326,7 +326,7 @@ export class InternalApi {
     const app = t.apps.get(caller.ins);
     if (!app) throw new BridgeError("app_unavailable", 503, "no verified config entry for this instance yet; retry");
     const user = caller.svc ?? "app";
-    const declared = t.config.keyRequirements.some((r) => r.ins === caller.ins && r.name === name && r.source === "account_default" && r.usedBy.includes(user));
+    const declared = keyRequirements(t).some((r) => r.ins === caller.ins && r.name === name && r.source === "account_default" && r.usedBy.includes(user));
     // mid-deploy (app down or its manifest not loaded): a key the next revision adds may not be listed yet → transient
     if (!declared && (app.down || !app.manifest)) throw new BridgeError("app_unavailable", 503, "the app is updating; retry");
     if (!declared) throw new BridgeError("key_not_declared", 403);
@@ -472,7 +472,7 @@ export class InternalApi {
  * sees settings (S6) and never re-derives this from the app's live manifest (C69).
  */
 export function serviceKeyNames(t: Table, ins: InstanceId, user: string): string[] {
-  return t.config.keyRequirements.filter((r) => r.ins === ins && r.usedBy.includes(user)).map((r) => r.name);
+  return keyRequirements(t).filter((r) => r.ins === ins && r.usedBy.includes(user)).map((r) => r.name);
 }
 
 /** Slice `rev` (from the slice payload) is the revision apps compare. */
