@@ -17,7 +17,11 @@
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  *    Reported only while the event log is available ({@link bridgeCaps}).
- *  - `hook_tool` (spec 0.1.68, bridge 0.2.9, BRIDGE v0.1.68) = on all three dynamic call paths (a listed entry, `<op>_call`,
+ *  - `model_roles` = ALL of BRIDGE §15 (spec 0.1.63, bridge 0.2.9): S11 bindings beside the key store (state.ts), the "Keys
+ *    and models" page (models-page.ts), `GET /tb/v1/model-roles/<role>` (internal.ts, model-roles.ts `resolveForCaller`),
+ *    `StatusReport.roles` (model-roles.ts `roleStatuses`) and the persona in instructions + `tb://agent/persona` (mcp.ts).
+ *    Core sends `agents[].persona` and `modelRoleRequirements[]` only to a bridge that declares it.
+ *  - `hook_tool` (spec 0.1.68, bridge 0.2.10, BRIDGE v0.1.68) = on all three dynamic call paths (a listed entry, `<op>_call`,
  *    the relay's dynamic call; all through calls.ts `route`) the hook `call.target.tool` is the resolution's canonical tool
  *    with its crud/effect/holdFamily, absent for static ops; a resolution whose tool differs from the requested name or is not
  *    `^[a-z][a-z0-9_]{1,62}$` is refused `dynamic_resolve_failed` (calls.ts `resolve`, `effectiveOp`).
@@ -30,7 +34,7 @@ import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 /** spec 0.1.68: `hook_tool` joins `BRIDGE_CAPS`; local until the spec pin carries it (`secret_output` waits for the manifest re-pin). */
 export type DeclaredCap = BridgeCap | "hook_tool";
 
-export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "hook_tool"];
+export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log

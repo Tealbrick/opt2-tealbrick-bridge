@@ -618,14 +618,14 @@ describe("review round 1 (bridge#16): limits, failures, documented edges", () =>
     assert.throws(() => st.ingest(world(), appA, [item({ n: 1 })]));
     assert.equal(st.healthy, false, "ingest answers 503 at once");
     assert.equal(st.available, true);
-    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events", "hook_tool"], "the cap stays inside the window");
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events", "model_roles", "hook_tool"], "the cap stays inside the window");
     clock += 4 * 60_000;
     assert.equal(st.probe(), false);
-    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events", "hook_tool"]);
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events", "model_roles", "hook_tool"]);
     assert.deepEqual(flips, [], "no status poke inside the window");
     clock += 60_000; // 5 min continuously unhealthy
     st.probe();
-    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "hook_tool"]);
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "model_roles", "hook_tool"]);
     assert.equal(st.available, false);
     assert.deepEqual(flips, [false]);
     st.exec("PRAGMA query_only = 0");
@@ -674,8 +674,8 @@ describe("review round 1 (bridge#16): limits, failures, documented edges", () =>
     clock += 10 * 60_000;
     st.sweep();
     assert.deepEqual(flips, []);
-    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events", "hook_tool"]);
-    assert.deepEqual(bridgeCaps({ events: undefined }), ["owner_rows", "hook_tool"], "no store: no events cap");
+    assert.deepEqual(bridgeCaps({ events: st }), ["owner_rows", "events", "model_roles", "hook_tool"]);
+    assert.deepEqual(bridgeCaps({ events: undefined }), ["owner_rows", "model_roles", "hook_tool"], "no store: no events cap");
   });
 
   test("round 2 / 3: a NOTADB file is moved aside and a fresh log starts with a reset point: truncated only for a cursor below it", () => {
@@ -714,7 +714,7 @@ describe("review round 1 (bridge#16): limits, failures, documented edges", () =>
     const { st: newer, flips } = withHealth(path);
     assert.equal(newer.available, false);
     assert.equal(newer.healthy, false);
-    assert.deepEqual(bridgeCaps({ events: newer }), ["owner_rows", "hook_tool"]);
+    assert.deepEqual(bridgeCaps({ events: newer }), ["owner_rows", "model_roles", "hook_tool"]);
     assert.ok(!readdirSync(dir).some((f) => f.includes("corrupt")), "never renamed");
     assert.equal(newer.probe(), false, "still newer");
     // the downgrade is undone (this bridge's schema again): the probe opens it, rows intact

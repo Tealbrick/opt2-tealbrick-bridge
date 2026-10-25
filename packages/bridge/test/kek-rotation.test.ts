@@ -19,7 +19,7 @@ const api = manifestApi();
 const kekId = (hex: string) => api.kekFromEnv(hex).id;
 
 /** every sealed record a bridge can hold, plus the 0.1.25 `format` marker */
-const ALL = ["claims", "connections", "enrol-refused", "identity", "jtis", "keys", "reports", "standalone"].map((n) => `${n}.sealed.json`);
+const ALL = ["claims", "connections", "enrol-refused", "identity", "jtis", "keys", "models", "reports", "standalone"].map((n) => `${n}.sealed.json`);
 
 const keks = (current: string, previous?: string) => keksFromEnv({ TB_KEK: current, ...(previous ? { TB_KEK_PREVIOUS: previous } : {}) }, api);
 
@@ -40,6 +40,8 @@ async function writeFullState(data: string, kek: string): Promise<void> {
   st.saveClaims();
   assert.ok(st.useJti("J1", now() + 600));
   st.setKey("OPENAI", "value-1");
+  // v0.1.63: S11 model-role bindings are a sealed record too
+  st.saveBindings([{ role: "reasoning", provider: "openai", model: "m-1", keyName: "OPENAI", dataPolicy: "standard" }]);
   st.standalone = { pausedWorkspace: false, pausedAgents: [], revokedConnections: [], rev: 3 };
   st.saveStandalone();
   st.reports = { revoked: [{ con: CON as never, reason: "client_revoke" }], pairingJtis: {} };
@@ -63,6 +65,7 @@ function assertFullState(r: Awaited<ReturnType<typeof readBack>>): void {
   assert.equal(r.st.claims[0]?.ins, INS);
   assert.ok(r.st.usedJtis.has("J1"));
   assert.equal(r.st.keyStore.values.OPENAI, "value-1");
+  assert.equal(r.st.bindings[0]?.model, "m-1");
   assert.equal(r.st.standalone?.rev, 3);
   assert.equal(r.st.reports.revoked[0]?.con, CON);
   assert.equal(r.refused, "sha256:refused");
@@ -78,7 +81,7 @@ describe("BRG-05: KEK rotation reseals every record", () => {
       await writeFullState(t.data, K1);
       for (const f of ALL) assert.equal(kekOf(t.dir, f), kekId(K1), `${f} starts under K1`);
       const rotated = await readBack(t.data, keks(K2, K1));
-      assert.equal(rotated.resealed, ALL.length, "all 8 records resealed (identity, enrol-refused and keys included)");
+      assert.equal(rotated.resealed, ALL.length, "all 9 records resealed (identity, enrol-refused, keys and models included)");
       assertFullState(rotated);
       for (const f of ALL) assert.equal(kekOf(t.dir, f), kekId(K2), `${f} is under K2`);
       assert.ok(!existsSync(join(t.dir, "format.sealed.json")), "the stale format marker is removed (nothing reads it)");
