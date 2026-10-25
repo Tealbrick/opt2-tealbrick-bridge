@@ -1,5 +1,5 @@
 /**
- * Spec 0.1.73 BRIDGE §7.5 (C330(1), M4b; QA "lazy listing DELTA"): tb_more_call hints are never stale where it matters.
+ * Spec 0.1.75 BRIDGE §7.5 (C330(1), M4b; QA "lazy listing DELTA"): tb_more_call hints are never stale where it matters.
  *  (a) list_changed whenever the tb_more_call annotations change, even when no tool NAME changes (an owner adds `delete`);
  *  (b) tb_more_call refuses an inner op wider than the hints this session last listed (`tools_stale`), also when the op is
  *      admitted inside the same call (refresh-on-miss); after a fresh tools/list the call runs.

@@ -11,9 +11,10 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { bridgeCaps } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
+import { roleStatuses } from "./model-roles.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
+import { acceptedDigests, buildTable, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { hasLazyOp } from "./tools.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
@@ -197,7 +198,7 @@ export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Prom
   const v = ctx.api.validateManifest(await res.json());
   // the validator's own code (e.g. dynamic_invalid), so Core can say why (L3)
   if (!v.ok) throw new ManifestError(v.errors[0]?.code ?? "manifest_invalid");
-  // spec 0.1.73 (C354, MANIFEST M-OP-13): a manifest with a lazy op needs a bridge with `lazy_tools`; without it, refuse here
+  // spec 0.1.75 (C354, MANIFEST M-OP-13): a manifest with a lazy op needs a bridge with `lazy_tools`; without it, refuse here
   if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new ManifestError("bridge_cap_missing");
   // C104: an app that needs a newer bridge is refused here, never routed half-working
   const need = ctx.api.requiredBridgeVersion(v.manifest).bridge;
@@ -407,7 +408,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       ...upgradeFields(h?.status),
     };
   });
-  const keys = (t?.config.keyRequirements ?? [])
+  const keys = (t ? keyRequirements(t) : [])
     .filter((k) => k.source === "account_default")
     .map((k) => ({ name: k.name, ins: k.ins, set: Object.hasOwn(ctx.state.keyStore.values, k.name) }));
   const connectionsCreated = [...ctx.state.connections.values()]
@@ -425,6 +426,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     portalKeysDigest: ctx.api.digest(id.portalKeys as unknown as Json),
     apps,
     keys,
+    // v0.1.63 (BRIDGE §15.5): one row per declared role per instance — labels only, never a base URL, key name or value
+    roles: roleStatuses(ctx),
     scopeSummaries: [...ctx.scopeSummaries.values()],
     connectionsCreated,
     // v0.1.14: connections that authenticated since the previous ACCEPTED report (latest time each, ≤ 500)

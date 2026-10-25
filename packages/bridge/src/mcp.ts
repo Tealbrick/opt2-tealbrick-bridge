@@ -1,7 +1,8 @@
 /**
  * MCP surface (BRIDGE §7): Streamable HTTP at /mcp (POST JSON-RPC, GET SSE for notifications,
  * DELETE ends the session). Tools come from grants; skills are resources + an instructions index +
- * the `<product>__tb_skills` fallback tool. Every request re-authenticates the agent (K5).
+ * the `<product>__tb_skills` fallback tool. Every request re-authenticates the agent (K5). v0.1.63 (BRIDGE §15.6): the
+ * agent's persona leads the instructions and is the resource `tb://agent/persona`.
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -10,9 +11,10 @@ import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec
 import { EVENT_MCP_METHODS, TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
+import { PERSONA_RESOURCE_URI } from "@opt2-tealbrick/spec/models";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { type CallRouter, RESOLVE_TTL_MS } from "./calls.ts";
-import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
+import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S, personaProblem } from "./context.ts";
 import { EVENT_POLL_LIMIT, isEventCursor, pollLimit } from "./events.ts";
 import { authenticateAgent, connectionState } from "./identity.ts";
 import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
@@ -27,7 +29,7 @@ interface Session {
   protocol: string;
   streams: Set<ServerResponse>;
   toolDigest: string;
-  /** spec 0.1.73 BRIDGE §7.5 rule (b): the `tb_more_call` annotations this session was last LISTED (tool name → hints);
+  /** spec 0.1.75 BRIDGE §7.5 rule (b): the `tb_more_call` annotations this session was last LISTED (tool name → hints);
    *  undefined until the session's first tools/list */
   moreListed?: Map<string, NonNullable<ToolDef["annotations"]>>;
   skillsDigest: string;
@@ -193,7 +195,7 @@ export class McpServer {
   }
 
   /**
-   * The digest a session's last tools/list is compared with: names AND annotations (spec 0.1.73 BRIDGE §7.5 rule (a): an owner
+   * The digest a session's last tools/list is compared with: names AND annotations (spec 0.1.75 BRIDGE §7.5 rule (a): an owner
    * change that widens `tb_more_call`'s hints keeps every name, and a client must still hear list_changed).
    */
   private toolsDigest(idx: ToolIndex): string {
@@ -244,6 +246,24 @@ export class McpServer {
     return t.config.skills.files.filter((f) => products.has(f.product));
   }
 
+  /** BRIDGE §15.6: the owner's persona of this agent; none for a paused (or unknown) agent, an empty, a too long or an invalid persona */
+  private persona(t: Table, agt: AgentId): string | undefined {
+    if (agentPausedOrEmpty(t, agt)) return undefined;
+    const p = t.agents.get(agt)?.persona;
+    // §15.6: a persona over the limit (UTF-16 units) or outside PERSONA_PATTERN is dropped, never cut; swapTable counts it
+    return typeof p === "string" && p.trim() && !personaProblem(p) ? p : undefined;
+  }
+
+  /** what `resources/list` shows this agent: its skills and its persona (a change of either → resources/list_changed) */
+  private resourcesDigest(t: Table, agt: AgentId): string {
+    const persona = this.persona(t, agt);
+    return this.ctx.api.digest(
+      this.skillsFor(t, agt)
+        .map((f) => `${f.product}/${f.id}`)
+        .concat(t.config.skills.digest, persona === undefined ? [] : [`persona:${this.ctx.api.digest(persona)}`]) as Json,
+    );
+  }
+
   private instructions(t: Table, agt: AgentId): string {
     if (agentPausedOrEmpty(t, agt)) return "Teal Brick: this agent is paused by the owner. No tools are available until the owner resumes it.";
     const lines = [
@@ -256,7 +276,9 @@ export class McpServer {
     }
     let out = lines.join("\n");
     if (Buffer.byteLength(out) > 4096) out = `${out.slice(0, 4000)}\n…`;
-    return out;
+    // §15.6: the persona comes first and is not cut by the 4 KB limit of the tools/skills part
+    const persona = this.persona(t, agt);
+    return persona === undefined ? out : `Your persona, set by the owner:\n${persona}\n\n${out}`;
   }
 
   private renderSkill(t: Table, agt: AgentId, product: string, id: string): string | undefined {
@@ -275,7 +297,7 @@ export class McpServer {
       try {
         const idx = await this.index(t, s.agt);
         const td = this.toolsDigest(idx);
-        const sd = this.ctx.api.digest(this.skillsFor(t, s.agt).map((f) => `${f.product}/${f.id}`).concat(t.config.skills.digest) as Json);
+        const sd = this.resourcesDigest(t, s.agt);
         if (s.toolDigest && td !== s.toolDigest) this.push(s, { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         if (s.skillsDigest && sd !== s.skillsDigest) this.push(s, { jsonrpc: "2.0", method: "notifications/resources/list_changed" });
         s.toolDigest = td;
@@ -573,15 +595,24 @@ export class McpServer {
       }
       case "resources/list": {
         const files = this.skillsFor(t, p.agt);
-        s.skillsDigest = this.ctx.api.digest(files.map((f) => `${f.product}/${f.id}`).concat(t.config.skills.digest) as Json);
+        s.skillsDigest = this.resourcesDigest(t, p.agt);
+        const persona = this.persona(t, p.agt) === undefined ? [] : [{ uri: PERSONA_RESOURCE_URI, name: "persona", title: "Your persona", description: "The persona the owner set for this agent. Follow it.", mimeType: "text/markdown" }];
         return {
-          resources: files.map((f) => ({ uri: `${TOOL_NAME_RULE.skillUriPrefix}${f.product}/${f.id}`, name: `${f.product}/${f.id}`, title: f.title, description: f.when ?? f.title, mimeType: "text/markdown" })),
+          resources: [
+            ...persona,
+            ...files.map((f) => ({ uri: `${TOOL_NAME_RULE.skillUriPrefix}${f.product}/${f.id}`, name: `${f.product}/${f.id}`, title: f.title, description: f.when ?? f.title, mimeType: "text/markdown" })),
+          ],
         };
       }
       case "resources/templates/list":
         return { resourceTemplates: [] };
       case "resources/read": {
         const uri = typeof rpc.params?.uri === "string" ? rpc.params.uri : "";
+        if (uri === PERSONA_RESOURCE_URI) {
+          const persona = this.persona(t, p.agt);
+          if (persona === undefined) throw new RpcError(-32002, "resource not found");
+          return { contents: [{ uri, mimeType: "text/markdown", text: persona }] };
+        }
         const m = /^tealbrick:\/\/skills\/([a-z][a-z0-9-]{1,31})\/([a-z][a-z0-9-]{1,39})$/.exec(uri);
         if (!m || !grantedProducts(t, p.agt).has(m[1] as string)) throw new RpcError(-32002, "resource not found");
         const text = this.renderSkill(t, p.agt, m[1] as string, m[2] as string);
@@ -656,7 +687,7 @@ export class McpServer {
         }
         throw new BridgeError("unknown_tool", 404);
       }
-      // spec 0.1.73 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
+      // spec 0.1.75 BRIDGE §7.5: `tool` names a STATIC op of the same product in this agent's index (lazy or listed); the
       // call then IS that op's direct call (input = `arguments`; key, gate, hooks, proof, holds and receipts name the op)
       let target: { route: ToolRoute; args: Json } = { route, args };
       if (route.kind === "more_call") {
@@ -670,7 +701,7 @@ export class McpServer {
         }
         const resolved = resolveMoreCall(idx, more.app, args);
         target = resolved;
-        // spec 0.1.73 BRIDGE §7.5 rule (b): never run an inner op wider than the hints this session last LISTED for this
+        // spec 0.1.75 BRIDGE §7.5 rule (b): never run an inner op wider than the hints this session last LISTED for this
         // tb_more_call (a harness may auto-approve on readOnlyHint); the client re-lists and calls again
         const session = sessionId ? this.sessions.get(sessionId) : undefined;
         const why = session?.moreListed ? exceedsListed(session.moreListed.get(name), resolved.route.op.effect) : null;
@@ -705,7 +736,7 @@ export class McpServer {
       return { content: [{ type: "text", text }], structuredContent: { skillId, text } };
     }
     if (route.kind === "more_search") {
-      // spec 0.1.73 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
+      // spec 0.1.75 BRIDGE §7.5: answered from the agent's own index (only ops its grants make visible); no app call
       const query = isRecord(args) && typeof args.query === "string" ? args.query : "";
       if (!query || query.length > 500) throw new BridgeError("input_invalid", 400, "query required (1–500 chars)");
       const limit = isRecord(args) && typeof args.limit === "number" ? Math.min(Math.max(1, Math.floor(args.limit)), 50) : 10;
@@ -754,12 +785,12 @@ export class McpServer {
 }
 
 /**
- * spec 0.1.73 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
+ * spec 0.1.75 BRIDGE §7.5 `tb_more_call {tool, arguments}`: `tool` = `<product>__<op>` or the bare op id. Only a static op
  * route of the SAME app in this agent's index qualifies; anything else (unknown, not visible to this agent, another product,
  * a standard op, a dynamic op or entry, a `tb_*` tool) is `unknown_tool`, the answer for a name that does not exist.
  */
 /**
- * spec 0.1.73 BRIDGE §7.5 rule (b): does an op of `effect` exceed the `tb_more_call` hints a session was listed? Returns the
+ * spec 0.1.75 BRIDGE §7.5 rule (b): does an op of `effect` exceed the `tb_more_call` hints a session was listed? Returns the
  * listed hint it breaks, or null. Not listed at all in a session that has listed tools = exceeds (the client saw no hints).
  */
 export function exceedsListed(listed: ToolDef["annotations"] | undefined, effect: string): string | null {

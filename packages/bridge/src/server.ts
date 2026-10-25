@@ -42,7 +42,7 @@ export interface BridgeServerOptions {
    * the production entry (bridge-server) never passes it.
    */
   portalRootKeys?: Ed25519PublicJwk[];
-  /** spec 0.1.73 BRIDGE §7.5 test harness only: run the lazy-tools path although the pinned validator predates it. Never env. */
+  /** spec 0.1.75 BRIDGE §7.5 test harness only: run the lazy-tools path although the pinned validator predates it. Never env. */
   lazyTools?: boolean;
 }
 

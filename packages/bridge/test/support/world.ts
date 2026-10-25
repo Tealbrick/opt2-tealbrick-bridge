@@ -188,7 +188,7 @@ export interface WorldOptions {
    * the per-form defaults).
    */
   formDefaultHosts?: boolean;
-  /** spec 0.1.73 BRIDGE §7.5: run the lazy-tools path although the pinned validator predates it (start option, test only) */
+  /** spec 0.1.75 BRIDGE §7.5: run the lazy-tools path although the pinned validator predates it (start option, test only) */
   lazyTools?: boolean;
 }
 
