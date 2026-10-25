@@ -16,7 +16,7 @@ import type { BridgePersonOp, BridgePersonOpResultInput } from "@opt2-tealbrick/
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
 import type { McpLimits } from "../../src/mcp.ts";
 import { type ListenerLimits, type RunningBridge, startBridge } from "../../src/server.ts";
-import { type Logger, silentLogger } from "../../src/util.ts";
+import { type Logger, pathOf, silentLogger } from "../../src/util.ts";
 import type { ViewsLimits } from "../../src/views-shared.ts";
 import { fakeApi } from "./fake-api.ts";
 
@@ -494,7 +494,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const seen = new Map<string, number>();
   const countRequests = (b: RunningBridge) =>
     b.publicServer.on("request", (req: IncomingMessage) => {
-      const path = new URL(req.url ?? "/", "http://x").pathname;
+      const path = pathOf(req.url) ?? "(unparseable)";
       seen.set(path, (seen.get(path) ?? 0) + 1);
     });
   countRequests(bridge);
