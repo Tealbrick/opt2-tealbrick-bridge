@@ -6,7 +6,7 @@
 # TB_PUBLIC_HOST (public listener address; default: no host, i.e. `::` dual stack as before).
 # BSD-04: USER is numeric 1000:1000. Railway runs volume services as root (RAILWAY_RUN_UID=0); the entry then chowns
 # TB_DATA_DIR and drops to 1000:1000 (SDK dropPrivileges) before it loads state or listens, and refuses to stay root.
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS build
 WORKDIR /src
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
@@ -15,7 +15,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts \
  && pnpm --filter @opt2-tealbrick/bridge --filter @opt2-tealbrick/bridge-server run build \
  && pnpm --filter @opt2-tealbrick/bridge-server deploy --prod /out
 
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 ENV NODE_ENV=production TB_DATA_DIR=/data PORT=8080 TB_INTERNAL_PORT=8788
 WORKDIR /app
 COPY --from=build /out ./

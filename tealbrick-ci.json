@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.9/ci/tealbrick-ci.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.21/ci/tealbrick-ci.schema.json",
   "kind": "bridge",
   "paths": [
     "."
@@ -10,7 +10,8 @@
       "product": "bridge",
       "context": ".",
       "dockerfile": "packages/bridge-server/Dockerfile",
-      "kind": "bridge"
+      "kind": "bridge",
+      "upgradeFrom": "<=0.1.31"
     }
   ]
 }
