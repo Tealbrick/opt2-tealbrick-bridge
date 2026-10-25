@@ -41,10 +41,13 @@ const KNOWN_APP_CAPS: readonly string[] = APP_CAPS;
 const APP_CAPS_MAX_ENTRIES: number = APP_CAPS_LIMITS.maxEntries;
 const APP_CAPS_MAX_LENGTH: number = APP_CAPS_LIMITS.maxLength;
 
-/** the known entries of a claim/push `caps` member; a non-array, a non-string entry, over 16 entries or an entry over 32 chars: none */
+/**
+ * The known entries of a claim/push `caps` member; a non-array, a non-string entry, over 16 entries or an entry over 32
+ * characters (Unicode code points, not UTF-16 units): none. Entries match exactly (no case folding, no trimming).
+ */
 export function knownAppCaps(v: unknown): ReadonlySet<string> {
   const out = new Set<string>();
-  if (!Array.isArray(v) || v.length > APP_CAPS_MAX_ENTRIES || v.some((e) => typeof e !== "string" || e.length > APP_CAPS_MAX_LENGTH)) return out;
+  if (!Array.isArray(v) || v.length > APP_CAPS_MAX_ENTRIES || v.some((e) => typeof e !== "string" || Array.from(e).length > APP_CAPS_MAX_LENGTH)) return out;
   for (const e of v as string[]) if (KNOWN_APP_CAPS.includes(e)) out.add(e);
   return out;
 }

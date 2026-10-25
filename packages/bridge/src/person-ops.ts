@@ -1,5 +1,5 @@
 /**
- * Person-op relay (spec 0.1.64, BRIDGE §15, PORTAL-API v0.1.64 B–C, C326). Core queues allow-listed person ops of native
+ * Person-op relay (spec 0.1.70, BRIDGE §16, PORTAL-API "v0.1.64 additions" B–C; C326, C354; introduced in spec 0.1.64). Core queues allow-listed person ops of native
  * owner sessions for this bridge; the bridge PULLS them (outbound only, like the config pull) and forwards each one ONCE to
  * the app: `POST <internalUrl>/tb/v1/person-op` with the K14 in `TB-Person-Op` and the exact body bytes Core hashed into
  * K14 `bd`. The app verifies K14 and decides; the bridge never verifies, stores or logs it, nor the input or the output.
@@ -31,6 +31,8 @@ const MAX_BATCH_BYTES = 2 * 1024 * 1024;
 const RESULT_TIMEOUT_MS = 5_000;
 /** pops already handled (memory): a row handed out twice is never forwarded twice */
 const SEEN_MAX = 512;
+/** a Core without the relay answers the pull 404: logged once per process, then at most hourly (the backoff keeps pulling) */
+const NOT_FOUND_LOG_EVERY_MS = 3_600_000;
 
 /** spec 0.1.70 (C354): the fixed refusals, and the app cap that allows a forward */
 const REFUSED = PERSON_OP_BRIDGE_REFUSALS;
@@ -55,7 +57,7 @@ export function forwardFailureStatus(e: unknown): -1 | 0 {
   return typeof code === "string" && TLS_FAILURE.test(code) ? -1 : 0;
 }
 
-/** BRIDGE §15: the relay loop. Resolves on shutdown, in standalone mode, or when draining. */
+/** BRIDGE §16: the relay loop. Resolves on shutdown, in standalone mode, or when draining. */
 export async function runPersonOpRelay(ctx: BridgeContext, signal: AbortSignal): Promise<void> {
   const seen = new Set<string>();
   const queue: BridgePersonOp[] = [];
@@ -81,6 +83,7 @@ export async function runPersonOpRelay(ctx: BridgeContext, signal: AbortSignal):
   const onAbort = () => wake?.();
   signal.addEventListener("abort", onAbort, { once: true });
   let backoff = FIRST_BACKOFF_MS;
+  let notFoundLoggedAt: number | undefined;
   // error pause: jittered, doubling 1 s → 30 s; reset by every well-formed batch
   const failed = (code: string): number => {
     if (code) ctx.log.warn("bridge.person_ops.poll_failed", { code });
@@ -114,7 +117,11 @@ export async function runPersonOpRelay(ctx: BridgeContext, signal: AbortSignal):
           const ra = Number(res.headers.get("retry-after"));
           // 429 / 503: Core's Retry-After (≤ 5 min), else the error pause, at least 5 s
           if (res.status === 429 || res.status === 503) wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 300) * 1000 : Math.max(failed(""), 5_000);
-          else wait = failed(`http_${res.status}`);
+          else if (res.status === 404) {
+            const quiet = notFoundLoggedAt !== undefined && Date.now() - notFoundLoggedAt < NOT_FOUND_LOG_EVERY_MS;
+            if (!quiet) notFoundLoggedAt = Date.now();
+            wait = failed(quiet ? "" : "http_404");
+          } else wait = failed(`http_${res.status}`);
         }
       } catch {
         if (signal.aborted || poll.signal.aborted) continue;

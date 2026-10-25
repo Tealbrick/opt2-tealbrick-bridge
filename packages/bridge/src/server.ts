@@ -276,7 +276,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const status = startStatusLoop(ctx, abort.signal);
   for (const ev of ["claim", "keys", "health", "connection-created", "connection-revoked"]) ctx.on(ev, () => status.poke());
   void runConfigLoop(ctx, abort.signal);
-  // BRIDGE §15 (spec 0.1.64): the person-op long-poll runs next to the config pull; it ends in standalone mode and on stop
+  // BRIDGE §16 (spec 0.1.70): the person-op long-poll runs next to the config pull; it ends in standalone mode and on stop
   void runPersonOpRelay(ctx, abort.signal);
   startManifestRetry(ctx, abort.signal);
   startStandaloneLoop(ctx, abort.signal);

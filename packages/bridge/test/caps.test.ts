@@ -1,7 +1,7 @@
 /**
  * Bridge 0.2.5 (spec 0.1.54, C292 / C292a): `StatusReport.bridge.caps`. The bridge declares ONLY what it implements:
  * `owner_rows` = the C283 A1 owner-row filter; `events` (bridge 0.2.7, spec 0.1.57) = all of BRIDGE §14 (app events); `person_ops`
- * (spec 0.1.64) = the person-op relay, BRIDGE §15. Core copies the set into the slices; a standalone bridge writes it into
+ * (spec 0.1.70, since 0.1.64) = the person-op relay, BRIDGE §16. Core copies the set into the slices; a standalone bridge writes it into
  * the slices it re-mints itself, without `person_ops` (the relay does not run there). Caps are advisory and never widen access.
  *
  * The cap list is a constant in caps.ts, tied to its feature by a probe per entry (below): a cap whose behaviour is
@@ -39,7 +39,7 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
       assert.ok(a.json?.result && !a.json.error, `${method}: ${JSON.stringify(a.json)}`);
     }
   },
-  // BRIDGE §15: a row queued in Core is pulled, forwarded once to the app with its K14, and the app's answer is posted back;
+  // BRIDGE §16: a row queued in Core is pulled, forwarded once to the app with its K14, and the app's answer is posted back;
   // the full behaviour is person-ops.test.ts
   person_ops: async (w) => {
     // spec 0.1.70 (C354): only an app that declares app cap person_op gets person ops

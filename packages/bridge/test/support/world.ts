@@ -160,7 +160,7 @@ export interface World {
    */
   bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown; /** answer every bridge op with this HTTP status and no body */ status?: number };
   /**
-   * BRIDGE §15 (spec 0.1.64): Core's person-op queue. `queue` rows are handed out by the next pull (taken at once, never twice);
+   * BRIDGE §16 (spec 0.1.70): Core's person-op queue. `queue` rows are handed out by the next pull (taken at once, never twice);
    * `polls` = pulls received (with their time); `results` = every result post, in order. `pollStatus` answers the pulls with
    * that status (and `retryAfter`) instead; `dropResults` closes the socket of the next n result posts (a network error).
    */
@@ -439,9 +439,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     if (url.pathname === "/api/v1/bridge/person-ops" && req.method === "GET") {
       personOps.polls.push(Date.now());
       if (personOps.pollStatus !== undefined) return res.writeHead(personOps.pollStatus, personOps.retryAfter ? { "retry-after": personOps.retryAfter } : {}).end();
-      // a short long-poll: rows queued meanwhile are handed out at once
+      // a short long-poll: rows queued meanwhile are handed out at once. A pull whose client went away (a bridge that stopped
+      // or restarted mid-poll) takes nothing: its rows would be lost on a dead socket
       const deadline = Date.now() + 300;
-      while (!personOps.queue.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      while (!personOps.queue.length && Date.now() < deadline && !req.socket.destroyed) await new Promise((r) => setTimeout(r, 25));
+      if (req.socket.destroyed) return;
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: personOps.queue.splice(0) }));
     }
     const resultPath = /^\/api\/v1\/bridge\/person-ops\/([^/]+)\/result$/.exec(url.pathname);

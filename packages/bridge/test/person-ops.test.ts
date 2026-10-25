@@ -1,5 +1,5 @@
 /**
- * Person-op relay (spec 0.1.64, BRIDGE §15, C326): a real bridge pulls queued person ops from a fake Core, forwards each one
+ * Person-op relay (spec 0.1.70, BRIDGE §16; C326, C354): a real bridge pulls queued person ops from a fake Core, forwards each one
  * ONCE to the (fake) app's `POST /tb/v1/person-op` and posts the app's answer back. Conformance rows:
  *   R-PO-1 cap declared ⇔ relay implemented (also caps.test.ts: probe, and no cap in standalone slices)
  *   R-PO-2 unknown `ins` → 409 result, no forward
@@ -18,7 +18,7 @@ import { after, before, describe, test } from "node:test";
 import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import { forwardFailureStatus, MIN_POLL_INTERVAL_MS, RELAY_CONCURRENCY } from "../src/person-ops.ts";
 import { buildStatusReport } from "../src/portal.ts";
-import { jsonLogger } from "../src/util.ts";
+import { jsonLogger, type Logger } from "../src/util.ts";
 import { claimApp } from "./support/app-client.ts";
 import { INS, makeWorld, type World, waitFor } from "./support/world.ts";
 
@@ -49,7 +49,7 @@ async function closedOrigin(): Promise<string> {
   return `http://127.0.0.1:${port}`;
 }
 
-describe("person-op relay (BRIDGE §15)", () => {
+describe("person-op relay (BRIDGE §16)", () => {
   let w: World;
   let dead: string;
   const lines: string[] = [];
@@ -208,6 +208,51 @@ describe("person-op relay (BRIDGE §15)", () => {
     await sleep(500);
     assert.equal(w.personOpApp.seen.length, from + 1);
     assert.equal(w.personOps.results.length, results, "no second result");
+  });
+
+  test("row-shape guards: one bad field → -1 and no request to the app (a bad id: dropped, no result); each control passes", async () => {
+    const valid = () => ({ ins: INS, op: "items_list", jws: `${rnd(12)}.${rnd(40)}.${rnd(32)}`, body: "{}" });
+    const sized = (n: number) => `{"p":"${"x".repeat(n - 8)}"}`;
+    const notDelivered: [string, Partial<ReturnType<typeof valid>>][] = [
+      // ins: the `ins_` prefix alone is not enough (a loose pattern would answer 409 instance_unknown instead of -1)
+      ["ins with a bad character", { ins: `${INS}!` }],
+      ["ins over 64 characters", { ins: `ins_${"A".repeat(65)}` }],
+      ["ins without the prefix", { ins: INS.slice(4) }],
+      ["op with a capital", { op: "Items_list" }],
+      ["op with a space", { op: "items list" }],
+      ["op with a slash", { op: "../ops/x" }],
+      ["op over 64 characters", { op: `a${"b".repeat(64)}` }],
+      ["jws with two segments", { jws: `${rnd(12)}.${rnd(40)}` }],
+      ["jws with four segments", { jws: `${rnd(12)}.${rnd(40)}.${rnd(32)}.${rnd(4)}` }],
+      ["jws with padding", { jws: `${rnd(12)}.${rnd(40)}.${rnd(32)}=` }],
+      ["jws over 16 KiB", { jws: `${rnd(12)}.${"a".repeat(16_384)}.${rnd(32)}` }],
+      ["body over maxInputBytes", { body: sized(PERSON_OP_RELAY.maxInputBytes + 1) }],
+    ];
+    for (const [why, bad] of notDelivered) {
+      const from = w.personOpApp.seen.length;
+      const { pop } = enqueue(w, { ...valid(), ...bad });
+      assert.deepEqual(await resultOf(w, pop), { pop, status: -1, body: "" }, why);
+      assert.equal(w.personOpApp.seen.length, from, `${why}: no request to the app`);
+    }
+    // a bad id: nothing to answer (the id is a path segment), so no result post and no request
+    const fromResults = w.personOps.results.length;
+    const fromSeen = w.personOpApp.seen.length;
+    for (const pop of ["pop_x/../../config", "pop_%2e%2e", "POP_abc", "pop_", `pop_${"A".repeat(65)}`, "pop-abc"]) enqueue(w, { ...valid(), pop });
+    await waitFor(() => w.personOps.queue.length === 0, 5000);
+    await sleep(800);
+    assert.equal(w.personOps.results.length, fromResults, "bad pop ids get no result post");
+    assert.equal(w.personOpApp.seen.length, fromSeen, "bad pop ids get no forward");
+    // controls: the same rows with every field valid, at the limits, are forwarded
+    for (const [why, ok] of [
+      ["a valid row", {}],
+      ["op of 64 characters with a dot", { op: `tb.${"b".repeat(61)}` }],
+      ["body of exactly maxInputBytes", { body: sized(PERSON_OP_RELAY.maxInputBytes) }],
+    ] as const) {
+      const from = w.personOpApp.seen.length;
+      const { pop } = enqueue(w, { ...valid(), ...ok });
+      assert.equal((await resultOf(w, pop)).status, 200, why);
+      assert.equal(w.personOpApp.seen.length, from + 1, why);
+    }
   });
 
   test("the result post is retried once on a network error, never more; the forward is not repeated", async () => {
@@ -405,5 +450,147 @@ describe("person-op relay: app cap person_op, fail closed (spec 0.1.70, C354)", 
     // a later push without the cap withdraws it
     assert.equal(await app.status({ caps: ["future_cap"] }), 200);
     await refusedWithoutForward("cap withdrawn by a push");
+  });
+
+  test("the 32-character limit counts code points: 32 emoji pass, 33 fail", async () => {
+    assert.equal(await app.status({ caps: ["person_op", "😀".repeat(32)] }), 200);
+    await forwarded("an entry of 32 emoji (64 UTF-16 units)");
+    assert.equal(await app.status({ caps: ["person_op", "😀".repeat(33)] }), 200);
+    await refusedWithoutForward("an entry of 33 emoji");
+  });
+});
+
+// QA probes P3–P8 (bridge#24 review, S3-2): caps state transitions; assertions kept as QA wrote them
+describe("person-op relay: app caps state transitions (QA P3–P8)", () => {
+  let w: World;
+  let app: Awaited<ReturnType<typeof claimApp>>;
+  const expectRefused = async (why: string, ins = INS, code = "person_op_unsupported") => {
+    const from = w.personOpApp.seen.length;
+    const { pop } = enqueue(w, { ins });
+    const r = await resultOf(w, pop);
+    assert.equal(r.status, 409, `${why}: status ${r.status} body ${r.body}`);
+    assert.equal((JSON.parse(r.body) as { error: { code: string } }).error.code, code, why);
+    await sleep(150);
+    assert.equal(w.personOpApp.seen.length, from, `${why}: zero requests to the app`);
+  };
+  const expectForwarded = async (why: string) => {
+    const from = w.personOpApp.seen.length;
+    const { pop } = enqueue(w);
+    const r = await resultOf(w, pop);
+    assert.equal(r.status, 200, `${why}: ${r.status}`);
+    assert.equal(w.personOpApp.seen.length, from + 1, why);
+  };
+  before(async () => {
+    w = await makeWorld();
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.personOps.polls.length > 0, 15000);
+    app = await claimApp(w, { claim: { caps: ["person_op"] } });
+    assert.equal(app.claimStatus, 200);
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("P3 a held-back older push with person_op does not restore a withdrawn cap", async () => {
+    // the held-back push must still be signed after the bridge's boot (BSD-12 refuses older proofs with 401), so it is
+    // 2 s older than the withdrawing push and the push is accepted: only the iat rule keeps the cap away
+    await sleep(2200);
+    assert.equal(await app.status({ caps: [] }), 200);
+    await expectRefused("withdrawn");
+    assert.equal(await app.status({ caps: ["person_op"] }, { age: 2 }), 200);
+    await expectRefused("older push replayed");
+  });
+
+  test("P4 a push for a version the config does not name cannot set caps", async () => {
+    assert.equal(await app.status({ caps: [] }), 200);
+    await expectRefused("push []");
+    assert.equal(await app.status({ caps: ["person_op"], version: "9.9.9" }), 200);
+    await expectRefused("unnamed version push");
+  });
+
+  test("P5 caps case/space variants are not person_op; prototype keys ignored", async () => {
+    for (const caps of [["PERSON_OP"], ["person_op "], ["person-op"], ["person_op\u0000"], { 0: "person_op", length: 1 }, ["__proto__"], ["constructor"], [["person_op"]], null]) {
+      assert.equal(await app.status({ caps }), 200);
+      await expectRefused(`caps ${JSON.stringify(caps)}`);
+    }
+    // a push WITHOUT the caps member (old SDK style) is none
+    assert.equal(await app.status({ caps: ["person_op"] }), 200);
+    await expectForwarded("restore");
+    assert.equal(await app.status({}, { omit: ["caps"] }), 200);
+    await expectRefused("push without caps member");
+  });
+
+  test("P6 ins variants: case, padding, path chars → instance_unknown or not delivered, never a forward", async () => {
+    assert.equal(await app.status({ caps: ["person_op"] }), 200);
+    const from = w.personOpApp.seen.length;
+    const variants = [INS.toLowerCase(), INS.replace("ins_", "INS_"), `${INS}%2F`, `${INS}/../${INS}`, `${INS} `, "ins_01HXXXXXXXXXXXXXXXXXXXXXXX", `../${INS}`, `${INS}\n`];
+    for (const ins of variants) {
+      const { pop } = enqueue(w, { ins });
+      const r = await resultOf(w, pop);
+      assert.ok(r.status === 409 || r.status === -1, `${JSON.stringify(ins)} → ${r.status}`);
+    }
+    for (const op of ["../ops/x", "items_list/../../x", "ITEMS", "a b"]) {
+      const { pop } = enqueue(w, { op });
+      const r = await resultOf(w, pop);
+      assert.equal(r.status, -1, `op ${op}`);
+    }
+    // a pop id with path chars is dropped (no result path built from it)
+    const before = w.personOps.results.length;
+    for (const pop of ["pop_x/../../config", "pop_%2e%2e", "POP_abc", "pop_"]) enqueue(w, { pop });
+    await sleep(800);
+    assert.equal(w.personOps.results.length, before, "bad pop ids get no result post");
+    assert.equal(w.personOpApp.seen.length, from, "no forward for any variant");
+  });
+
+  test("P7 config update (new version) drops caps; an old-version push cannot restore them; a new-version push can", async () => {
+    assert.equal(await app.status({ caps: ["person_op"] }), 200);
+    await expectForwarded("before update");
+    w.updateApp(0);
+    await w.publish();
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 10000);
+    await expectRefused("after update, before any push");
+    assert.equal(await app.status({ caps: ["person_op"] }), 200); // version 1.0.0 (old)
+    await expectRefused("old-version push after update");
+    assert.equal(await app.status({ caps: ["person_op"], version: "1.0.1" }), 200);
+    await expectForwarded("new-version push");
+  });
+
+  test("P8 bridge restart: caps empty until the next push", async () => {
+    await w.restart();
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    await expectRefused("after restart");
+    // the first push after the restart (no stored record yet) sets the caps again
+    assert.equal(await app.status({ caps: ["person_op"], version: "1.0.1" }), 200);
+    await expectForwarded("first push after restart");
+  });
+});
+
+describe("person-op relay: a Core without the relay (404) is logged once, then at most hourly", () => {
+  let w: World;
+  const warns: { event: string; code: unknown }[] = [];
+  // every call, no dedupe (the JSON logger's own per-minute dedupe would hide repeats)
+  const logger: Logger = { info() {}, warn: (event, f) => void warns.push({ event, code: f?.code }), error() {} };
+  before(async () => {
+    w = await makeWorld({ logger });
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.personOps.polls.length > 0, 15000);
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("three 404 pulls → one warn line; another error code still logs; the relay recovers", async () => {
+    w.personOps.pollStatus = 404;
+    try {
+      const from = w.personOps.polls.length;
+      await waitFor(() => w.personOps.polls.length - from >= 3, 20000);
+      const notFound = warns.filter((x) => x.event === "bridge.person_ops.poll_failed" && x.code === "http_404");
+      assert.equal(notFound.length, 1, `404 warn lines: ${notFound.length}`);
+      w.personOps.pollStatus = 500;
+      await waitFor(() => warns.some((x) => x.event === "bridge.person_ops.poll_failed" && x.code === "http_500"), 30000);
+    } finally {
+      w.personOps.pollStatus = undefined;
+    }
+    assert.equal((await claimApp(w, { claim: { caps: ["person_op"] } })).claimStatus, 200);
+    const { pop } = enqueue(w);
+    assert.equal((await resultOf(w, pop, 40000)).status, 200);
   });
 });

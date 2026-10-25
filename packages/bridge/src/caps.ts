@@ -17,7 +17,7 @@
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  *    Reported only while the event log is available ({@link bridgeCaps}).
- *  - `person_ops` = the person-op relay, ALL of BRIDGE §15 (spec 0.1.64, C326): the long-poll of queued person ops from Core,
+ *  - `person_ops` = the person-op relay, ALL of BRIDGE §16 (spec 0.1.70; since 0.1.64, C326, C354): the long-poll of queued person ops from Core,
  *    one forward per op to the app's `POST /tb/v1/person-op` and the result post (person-ops.ts `runPersonOpRelay`).
  *    Never in standalone mode: the relay does not run there (no K14 issuer), so re-minted slices leave it out.
  */

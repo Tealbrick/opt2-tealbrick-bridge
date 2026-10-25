@@ -2,12 +2,12 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
-## Unreleased — person-op relay (C326, C337a; spec 0.1.64)
+## Unreleased — person-op relay (C326, C337a, C354; spec 0.1.70)
 
-- **Relay** (BRIDGE §15, PORTAL-API v0.1.64 C): one long-poll `GET /bridge/person-ops?wait=25` to Core with the bridge assertion, next to the config pull; never in standalone mode. Each queued person op is forwarded ONCE to the app (`POST <internalUrl>/tb/v1/person-op`, header `TB-Person-Op`, the exact UTF-8 body bytes, timeout `PERSON_OP_RELAY.bridgeForwardS`) and the app's status and body go back in `POST /bridge/person-ops/{pop}/result`; `409 instance_unknown` for an instance outside the config, `-1` not delivered (connect refused, DNS, TLS), `0` outcome unknown (timeout or broken answer after sending, answer over 96 KiB). At most 4 at once; no forward retries; the result post is retried once on a network error. Logs carry pop, ins, op, status and ms only. Pause does not stop it (ARCHITECTURE.md section 13).
-- **App cap** `person_op` (spec 0.1.70, C354): the relay forwards only to an app whose latest claim or accepted status push declares it in `caps`; otherwise result `409 person_op_unsupported`, nothing forwarded. Malformed `caps` (not an array of strings, more than 16 entries, an entry over 32 chars) = none; unknown entries ignored. Stored like `proofClaims` (BRIDGE hooks step 6).
+- **Relay** (BRIDGE §16 in spec 0.1.70, PORTAL-API "v0.1.64 additions" C): one long-poll `GET /bridge/person-ops?wait=25` to Core with the bridge assertion, next to the config pull; never in standalone mode. Each queued person op is forwarded ONCE to the app (`POST <internalUrl>/tb/v1/person-op`, header `TB-Person-Op`, the exact UTF-8 body bytes, timeout `PERSON_OP_RELAY.bridgeForwardS`) and the app's status and body go back in `POST /bridge/person-ops/{pop}/result`; `409 instance_unknown` for an instance outside the config, `-1` not delivered (connect refused, DNS, TLS), `0` outcome unknown (timeout or broken answer after sending, answer over 96 KiB). At most 4 at once; no forward retries; the result post is retried once on a network error. Logs carry pop, ins, op, status and ms only. Pause does not stop it (ARCHITECTURE.md section 13).
+- **App cap** `person_op` (spec 0.1.70, C354): the relay forwards only to an app whose latest claim or accepted status push declares it in `caps`; otherwise result `409 person_op_unsupported`, nothing forwarded. Malformed `caps` (not an array of strings, more than 16 entries, an entry over 32 code points) = none; unknown entries ignored, entries match exactly. Stored like `proofClaims` (BRIDGE hooks step 6).
 - **Cap** `person_ops` in `StatusReport.bridge.caps` (not in re-minted standalone slices).
-- Pin: `@opt2-tealbrick/spec` 0.1.64 (`packages/bridge`); the lockfile and its integrity are pinned after the spec release.
+- Pin: `@opt2-tealbrick/spec` 0.1.70 (bridge, bridge-server, and the relay's and manifest's spec through overrides), integrity in the lockfile.
 
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
