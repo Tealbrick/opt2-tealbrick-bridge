@@ -9,6 +9,7 @@ import { isRefusal, SDK_CURRENT_MAJOR } from "@opt2-tealbrick/relay";
 import { type AppStatus, type AppStatusResponse, BRIDGE_INTERNAL_PATHS, type CallEnvelope, type ClaimRequest, type ClaimResponse, type KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { ErrorCode } from "@opt2-tealbrick/spec/routes";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
@@ -35,13 +36,16 @@ export const EVENT_INGEST_MAX_BYTES = 512 * 1024;
 /** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. Event ingest uses the same bucket (§14.1). */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
 
+/** spec 0.1.71 error code of BRIDGE §9.4 / §15.4 (declared in the spec's `ErrorCode`, not in `BridgeErrorCode`) */
+const BAD_REQUEST = "bad_request" satisfies ErrorCode;
+
 /** A decoded path segment; a malformed percent escape (`%`, `%FF`, `%E0%A4%A`) is `400 bad_request` right after the caller is
  *  authenticated, never 500 (QA-BRIDGE22-2; BRIDGE §9.4 / §15.4 of specs#55, RM-25). */
 function pathSegment(raw: string): string {
   try {
     return decodeURIComponent(raw);
   } catch {
-    throw new BridgeError("bad_request", 400, "malformed percent-encoding in the path");
+    throw new BridgeError(BAD_REQUEST, 400, "malformed percent-encoding in the path");
   }
 }
 

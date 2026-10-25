@@ -71,8 +71,6 @@ export interface KeyStore {
    * exactly (`keyName`).
    */
   values: Record<string, string>;
-  /** the earlier 0.2.8 shape (provider labels stored bare in `values`): read once by {@link BridgeState.load}, never written */
-  providerKeys?: string[];
 }
 
 /** S3 namespace of owner-named provider keys (QA-BRIDGE22-1) */
@@ -285,7 +283,6 @@ export class BridgeState {
       this.keyStore.keysRev = models.rev;
       this.saveKeyStore();
     }
-    this.migrateProviderKeys();
     this.standalone = this.readRecord<StandaloneOverlay>("standalone");
     this.reports = this.readRecord<PendingReports>("reports") ?? { revoked: [], pairingJtis: {} };
     return resealed;
@@ -373,28 +370,6 @@ export class BridgeState {
     this.usedJtis.set(jti, exp + 30);
     this.saveJtis();
     return true;
-  }
-
-  /**
-   * QA-BRIDGE22-1: an earlier 0.2.8 volume kept provider labels bare in `values` (listed in `providerKeys`), so a later app
-   * requirement with the same name read the owner's provider key. Move each one to its own namespace and point the
-   * bindings that named it there; one write of S11 + S3 and one `keysRev` bump (apps re-fetch). Idempotent: a crash
-   * between the two writes repeats it on the next start.
-   */
-  private migrateProviderKeys(): void {
-    const legacy = this.keyStore.providerKeys;
-    if (!legacy) return;
-    const values = { ...this.keyStore.values };
-    for (const label of legacy) {
-      if (!Object.hasOwn(values, label)) continue;
-      values[providerKeyName(label)] = values[label] as string;
-      delete values[label];
-    }
-    const moved = new Set(legacy);
-    const bindings = this.bindings.map((b) => (b.keyName && moved.has(b.keyName) ? { ...b, keyName: providerKeyName(b.keyName) } : b));
-    this.keyStore.values = values;
-    delete this.keyStore.providerKeys;
-    this.saveModels(bindings, this.ownHosts);
   }
 
   /**

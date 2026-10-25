@@ -362,7 +362,7 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     const appKeyBind = await bind({ role: "reasoning", provider: "openai", model: "gpt-test", keyName: "NOTES_API_KEY" });
     assert.equal(appKeyBind.status, 400);
     assert.match(await appKeyBind.text(), /choose a provider key from the list/);
-    // a binding stored by the earlier 0.2.8 shape that names an app key: not served, status set:false, page "key missing"
+    // a stored binding that names an app key (written directly): not served, status set:false, page "key missing"
     const st = w.bridge.ctx.state;
     st.saveBindings(st.bindings.map((b) => (b.role === "reasoning" && !b.ins ? { ...b, keyName: "NOTES_API_KEY" } : b)));
     assert.equal(json(await h.role(appKey, INS, "reasoning")).error.code, "role_not_set");

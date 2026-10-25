@@ -37,7 +37,7 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
       assert.ok(a.json?.result && !a.json.error, `${method}: ${JSON.stringify(a.json)}`);
     }
   },
-  // BRIDGE §15 (bridge 0.2.8): the resolve route answers (unauthenticated → 401, not 404), the status report carries
+  // BRIDGE §15 (bridge 0.2.9): the resolve route answers (unauthenticated → 401, not 404), the status report carries
   // `roles[]`, and the key page is "Keys and models"; the full behaviour is model-roles.test.ts and persona.test.ts
   model_roles: async (w) => {
     const r = await fetch(`${w.internalUrl}/tb/v1/model-roles/reasoning`);

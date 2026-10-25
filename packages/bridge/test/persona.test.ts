@@ -99,24 +99,24 @@ describe("RM-7: agent persona in instructions and as a resource", () => {
     assert.equal(rejected(), 1, "rejected {kind: config, code: persona_too_long}");
   });
 
-  test("a persona outside PERSONA_PATTERN (C356, spec follow-up #53) is persona_invalid; script characters and markers pass", () => {
-    // the spec's own lists (specs#53 9f9f916, packages/spec/test/models.test.ts)
+  test("a persona outside PERSONA_PATTERN (spec 0.1.71) is persona_invalid; script characters and markers pass", () => {
+    // the spec's own lists, copied verbatim (specs main 0b39be8 = spec 0.1.71, packages/spec/test/models.test.ts)
     const refused = ["\u0001", "\u000b", "\u000c", "\u001f", "\u0080", "\u009f", "\u115f", "\u1160", "\u3164", "\uffa0",
-      "\u17b4", "\u17b5", "\u070f", "\u0008", "\u001b", "\u2028", "\u2029", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+      "\u17b4", "\u17b5", "\u0008", "\u001b", "\u2028", "\u2029", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
       "\u2060", "\u2061", "\u2064", "\u2065", "\u2066", "\u2067", "\u2068", "\u2069", "\u206a", "\u206f", "\ufeff",
       "\ufff0", "\ufff8", "\ufff9", "\ufffb", "\udbff", "\udfff", "\u{e0000}", "\u{e0041}", "\u{e007f}", "\u{e0080}",
       "\u{1bca0}", "\ufe0f\ufe0f", "\ufe00\ufe01", "\u{e0100}\u{e0101}", "\ufe0f\u200d\ufe0f", "x\u200d\ufe0f", "\u200c\ufe00",
-      "\u0600\ufe0f", "\u00ad\u{e0100}", `😀${"\ufe0f".repeat(54)}`, "\r", "\u007f"];
-    for (const bad of refused) assert.equal(personaProblem(`a${bad}b`), "persona_invalid", JSON.stringify(bad));
+      "\u0600\ufe0f", "\u00ad\u{e0100}", `😀${"\ufe0f".repeat(54)}`];
+    for (const bad of [...refused, "\r", "\u007f"]) assert.equal(personaProblem(`a${bad}b`), "persona_invalid", JSON.stringify(bad));
     const allowed = ["\t", "\n", "\u00ad", "\u034f", "\u061c", "\u180b", "\u180d", "\u180e", "\u180f", "\u200a", "\u200b",
       "\u200c", "\u200d", "\u200e", "\u200f", "\u2027", "\u202f", "\u205f", "\u2070", "\u115e", "\u1161", "\u3163",
       "\u3165", "\uff9f", "\uffa1", "\ufdff", "\ufe00", "\ufe0f", "\ufffc", "\u{e0100}", "\u{e01ef}", "\u{1f600}",
-      "👨\u200d👩\u200d👧", "❤\ufe0f", "1\ufe0f\u20e3", "\u0628\u200c\u0627", "\u05d0\u200f\u05d1", "\u0600", "\u0605", "\u06dd",
+      "👨\u200d👩\u200d👧", "❤\ufe0f", "1\ufe0f\u20e3", "\u0628\u200c\u0627", "\u05d0\u200f\u05d1", "\u0600", "\u0605", "\u06dd", "\u070f", "\u0890", "\u0891", "\u08e2", "\u{110bd}", "\u{110cd}", " \ufe0f", "a\ufe00",
       "\u0661\u0600\u0662", "🏳\ufe0f\u200d🌈", "❤\ufe0f\u200d🔥", "👁\ufe0f\u200d🗨\ufe0f", "\u00a0", " !~"];
     for (const ok of allowed) assert.equal(personaProblem(`a${ok}b`), undefined, JSON.stringify(ok));
-    // QA-BRIDGE22-5: a VS/ZWJ/VS payload after an emoji is refused; Arabic number signs are delivered
+    // QA-BRIDGE22-5: a VS/ZWJ/VS payload after an emoji is refused; Arabic number signs and prepended marks are delivered
     assert.equal(personaProblem("Helpful 😀\ufe0f\u200d\ufe0f"), "persona_invalid");
-    assert.equal(personaProblem("\u0600\u0661\u0662 ok"), undefined);
+    assert.equal(personaProblem("\u0600\u0661\u0662 ok \u070f \u{110bd}"), undefined);
     assert.equal(personaProblem("x".repeat(8001)), "persona_too_long");
   });
 

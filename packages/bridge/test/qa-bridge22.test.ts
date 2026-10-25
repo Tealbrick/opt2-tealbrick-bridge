@@ -1,12 +1,15 @@
 /**
  * QA review of bridge#22 (coordination qa/VERDICTS.md QA-BRIDGE22-1..3):
  *  - S2 -1: owner-named provider keys live in their own S3 namespace. A provider key labelled like an app requirement
- *    (OPENAI_API_KEY) never answers `GET /tb/v1/keys/OPENAI_API_KEY`, and the page shows that app key "Not set". A store
- *    saved by the earlier 0.2.8 shape (label bare in `values`) is migrated on load and still serves its role binding.
+ *    (OPENAI_API_KEY) never answers `GET /tb/v1/keys/OPENAI_API_KEY`, and the page shows that app key "Not set". A key
+ *    store written by the RELEASED bridge 0.2.7 (fixtures/released-0.2.7, see below) loads unchanged: its requirement keys
+ *    stay requirement keys.
  *  - S3 -2: a malformed percent escape in the role or key path is 400, not 500.
  *  - S3 -3: a provider change clears the zdr attestation (R18).
  */
 import assert from "node:assert/strict";
+import { copyFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
@@ -85,32 +88,6 @@ describe("QA-BRIDGE22: provider keys in their own namespace, percent errors, zdr
     assert.equal(missing.json.error.code, "key_not_declared");
   });
 
-  test("S2 -1: a store of the earlier 0.2.8 shape migrates on load; the binding still resolves, the app key is not set", async () => {
-    const st = w.bridge.ctx.state;
-    // what an earlier 0.2.8 bridge wrote: the provider label bare in `values`, listed in `providerKeys`, named by the binding
-    st.keyStore = { keysRev: st.keyStore.keysRev, values: { ...st.keyStore.values, MISTRAL_API_KEY: "sk-legacy-qa22" }, providerKeys: ["MISTRAL_API_KEY"] };
-    st.saveBindings([...st.bindings.filter((b) => b.role !== "reasoning"), { role: "reasoning", provider: "mistral", model: "mistral-qa", keyName: "MISTRAL_API_KEY", dataPolicy: "standard" }]);
-    assert.deepEqual(st.keyStore.providerKeys, ["MISTRAL_API_KEY"], "written in the old shape");
-    await w.amend((c) => {
-      c.keyRequirements.push(appKeyReq("MISTRAL_API_KEY"));
-    });
-    await w.restart();
-    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
-    const migrated = w.bridge.ctx.state;
-    assert.equal(migrated.keyStore.providerKeys, undefined, "the old list is gone");
-    assert.equal(migrated.keyStore.values["pk:MISTRAL_API_KEY"], "sk-legacy-qa22");
-    assert.ok(!Object.hasOwn(migrated.keyStore.values, "MISTRAL_API_KEY"));
-    assert.equal(migrated.bindings.find((b) => b.role === "reasoning")?.keyName, "pk:MISTRAL_API_KEY");
-    assert.equal(migrated.keyStore.values["pk:OPENAI_API_KEY"], "sk-provider-qa22", "keys already in the new shape are untouched");
-    const r = await internal("/tb/v1/model-roles/reasoning");
-    assert.equal(r.status, 200);
-    assert.equal(r.json.key, "sk-legacy-qa22", "the migrated key still serves its role binding");
-    const k = await internal("/tb/v1/keys/MISTRAL_API_KEY");
-    assert.equal(k.status, 404);
-    assert.equal(k.json.error.code, "key_not_set");
-    assert.equal(appKeyTag(await open(), "MISTRAL_API_KEY"), "Not set");
-  });
-
   test("S3 -2 / RM-25: authenticated first (401), then a malformed percent escape in the role or key path is 400 bad_request, never 500", async () => {
     for (const path of ["/tb/v1/model-roles/%", "/tb/v1/model-roles/%FF", "/tb/v1/model-roles/%E0%A4%A", "/tb/v1/keys/%", "/tb/v1/keys/%FF", "/tb/v1/keys/%E0%A4%A"]) {
       const r = await internal(path);
@@ -142,5 +119,61 @@ describe("QA-BRIDGE22: provider keys in their own namespace, percent errors, zdr
     const after = w.bridge.ctx.state.bindings.find((b) => b.role === "summarize");
     assert.equal(after?.provider, "anthropic");
     assert.ok(after?.zdrAttestedAt && after.zdrAttestedAt >= before.zdrAttestedAt);
+  });
+});
+
+/**
+ * Real released store: fixtures/released-0.2.7/bridge/keys.sealed.json was written by the released bridge code (tag
+ * bridge-v0.2.7 = 1de8dfc, its own BridgeState.setKey, TB_KEK = this test world's "11"×32) with two requirement keys,
+ * NOTES_API_KEY and OPENAI_API_KEY. No bridge release ever wrote provider keys (bridge#27, the 0.2.8 patch release,
+ * leaves state.ts as in 0.2.7), so there is nothing to migrate: every key must stay a requirement key.
+ */
+describe("QA-BRIDGE22: a key store of the released bridge 0.2.7 loads unchanged", () => {
+  let w: World;
+  let appKey: Ed25519KeyPair;
+  before(async () => {
+    w = await makeWorld({ real: true });
+    appKey = await w.api.generateKeyPair();
+    await w.amend((c) => {
+      c.instanceKeys.push({ ins: INS, jwk: appKey.publicJwk } as never);
+      c.keyRequirements.push(appKeyReq("OPENAI_API_KEY"));
+      c.modelRoleRequirements = [ROLE];
+    });
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    copyFileSync(new URL("./fixtures/released-0.2.7/bridge/keys.sealed.json", import.meta.url), join(w.dataDir, "bridge", "keys.sealed.json"));
+    await w.restart();
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("requirement keys stay requirement keys; key fetch serves them; the page shows them Set; no binding is satisfied", async () => {
+    const st = w.bridge.ctx.state;
+    assert.deepEqual(Object.keys(st.keyStore.values).sort(), ["NOTES_API_KEY", "OPENAI_API_KEY"], "nothing moved to pk:");
+    assert.deepEqual(st.bindings, []);
+    const fetchKey = async (name: string) => {
+      const path = `/tb/v1/keys/${name}`;
+      const assertion = await w.api.signAssertion("tb-instance-assert+jwt", { iss: `tb:ins:${INS}`, sub: `tb:ins:${INS}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 60, jti: w.api.ulid() }, appKey, { method: "GET", pathAndQuery: path });
+      const r = await fetch(`${w.internalUrl}${path}`, { headers: { "TB-Assert": assertion } });
+      return { status: r.status, json: await r.json() };
+    };
+    for (const [name, value] of [["OPENAI_API_KEY", "sk-released-openai-027"], ["NOTES_API_KEY", "sk-released-notes-027"]]) {
+      const r = await fetchKey(name as string);
+      assert.equal(r.status, 200, name);
+      assert.equal(r.json.value, value, name);
+    }
+    assert.deepEqual(
+      buildStatusReport(w.bridge.ctx).keys.filter((k) => k.ins === INS).map((k) => [k.name, k.set]).sort(),
+      [["NOTES_API_KEY", true], ["OPENAI_API_KEY", true]],
+    );
+    const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 120, jti: w.api.ulid(), ws: WS, pur: "keys" });
+    const html = await (await fetch(`${w.keysUrl}/keys`, { method: "POST", headers: FORM, body: new URLSearchParams({ ticket }), redirect: "manual" })).text();
+    for (const name of ["OPENAI_API_KEY", "NOTES_API_KEY"]) {
+      assert.equal(new RegExp(`<h2 id="k-${name}">[\\s\\S]*?</h2><span class="tb-tag [a-z-]+"><span class="tb-ink">([^<]+)</span>`).exec(html)?.[1], "Set", name);
+    }
+    assert.doesNotMatch(html, /<h3 id="pk-/, "no provider keys");
+    // an app key never satisfies a role binding: the role is unset
+    assert.equal(buildStatusReport(w.bridge.ctx).roles?.find((r) => r.role === "reasoning")?.set, false);
   });
 });

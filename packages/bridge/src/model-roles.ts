@@ -207,7 +207,7 @@ export function resolveBinding(bindings: readonly ModelBinding[], ins: InstanceI
 /**
  * The bound key's value: null for a provider without keys; undefined when a needed key is missing — not set, the provider
  * unknown, or the binding names something that is not a provider key (spec 0.1.69 / QA-BRIDGE22-1: a requirement key never
- * satisfies a binding, e.g. a binding stored by the earlier 0.2.8 shape that names an app key).
+ * satisfies a binding, whatever a stored binding names).
  */
 export function boundKey(b: ModelBinding, values: Readonly<Record<string, string>>): string | null | undefined {
   const p = providerById(b.provider);

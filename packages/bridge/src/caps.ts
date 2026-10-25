@@ -17,7 +17,7 @@
  *    `ingestEvents`), the per-agent log with fan-out, retention, holds, re-ids and purges (events.ts `EventStore`), and
  *    `tealbrick/events/{list,poll,stream}` + `notifications/tealbrick/event` frames on the agent's `/mcp` session (mcp.ts).
  *    Reported only while the event log is available ({@link bridgeCaps}).
- *  - `model_roles` = ALL of BRIDGE §15 (spec 0.1.63, bridge 0.2.8): S11 bindings beside the key store (state.ts), the "Keys
+ *  - `model_roles` = ALL of BRIDGE §15 (spec 0.1.63, bridge 0.2.9): S11 bindings beside the key store (state.ts), the "Keys
  *    and models" page (models-page.ts), `GET /tb/v1/model-roles/<role>` (internal.ts, model-roles.ts `resolveForCaller`),
  *    `StatusReport.roles` (model-roles.ts `roleStatuses`) and the persona in instructions + `tb://agent/persona` (mcp.ts).
  *    Core sends `agents[].persona` and `modelRoleRequirements[]` only to a bridge that declares it.

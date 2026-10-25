@@ -223,7 +223,7 @@ function bindingForm(ctx: BridgeContext, t: Table, csrf: string, v: RoleView, id
 
 function bindingText(ctx: BridgeContext, b: ModelBinding): string {
   const p = providerById(b.provider);
-  // a binding that names no provider key (deleted, or an app key from the earlier 0.2.8 shape): the owner picks one
+  // a binding that names no provider key (deleted, or anything else): the owner picks one
   const key = p && !p.keyNeeded ? "no key" : boundKey(b, ctx.state.keyStore.values) !== undefined && b.keyName ? `key ${keyLabel(b.keyName)}` : "key missing";
   return [p?.label ?? b.provider, b.model, baseUrlOf(b) ?? "no address", key, policyText(effectivePolicy(b, ownNet(ctx)))].join(" · ");
 }
