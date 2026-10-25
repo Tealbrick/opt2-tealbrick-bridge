@@ -23,7 +23,7 @@ describe("missingBridgeCap (C354)", () => {
     assert.equal(missingBridgeCap({ requires: { bridgeCaps: ["hook_tool", "secret_output"] }, operations: [] }), "secret_output");
     assert.equal(missingBridgeCap({ requires: { bridgeCaps: ["lazy_tools"] }, operations: [] }), "lazy_tools");
     assert.equal(missingBridgeCap({ operations: [{ id: "lease", secretOutput: true }] }), "secret_output", "implied by a secretOutput op even when undeclared");
-    assert.equal(missingBridgeCap({ requires: { bridgeCaps: ["hook_tool"] } }, { requiredBridgeCaps: () => ["model_roles"] }), "model_roles", "the shared function wins");
+    assert.equal(missingBridgeCap({ requires: { bridgeCaps: ["hook_tool"] } }, { requiredBridgeCaps: () => ["lazy_tools"] }), "lazy_tools", "the shared function wins");
     assert.equal(missingBridgeCap({ requires: { bridgeCaps: ["secret_output"] } }, {}, ["secret_output"]), undefined, "a bridge that declares it accepts it");
   });
 });
