@@ -2,6 +2,13 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.8 — patch: an unparseable request target is a 400 (C358; SECURITY; spec 0.1.57, manifest 0.1.30, conformance 0.1.28 unchanged)
+
+- **Fix (bridge#21):** a request whose target cannot be parsed as a URL (for example `GET //`) crashed the process; it is now answered with a 400 and the bridge keeps running. A new test (`test/bad-target.test.ts`) covers it.
+- **Build (bridge#19):** Node 24.22.1 base image (Node.js security release 2026-10-21).
+- **Tests only (bridge#18):** the key page replaces a key that is already set (no code change).
+- No other behaviour change, no new dependency, no state migration. The per-app event share planned for 0.2.8 (C274f) moves to 0.2.9 (C358).
+
 ## 0.2.7 — app events (C274c/C274d; spec 0.1.57, manifest 0.1.30, conformance 0.1.28)
 
 - **Ingest** `POST /tb/v1/events` on the internal listener (BRIDGE §14.1): instance assertion of the claimed app instance (`htm`, `htu`, `bd`); a companion service → 403; body ≤ 512 KiB, 1..100 items processed in order with one result per item; 429 from the companion-call bucket of the instance; 503 `app_not_claimed` for an instance the config does not list. Per item the §14.1 steps in order (declaration, shape and size, scoped ⇔ `instanceId` + `eligible`, target ⇔ `to`, dedupe of `(app instance, key)` for 7 days, emits and purges alike), with the shared rules of `@opt2-tealbrick/manifest` 0.1.30.
