@@ -7,6 +7,8 @@
  *   R-PO-4 no body/JWS in logs
  *   R-PO-5 one forward per pop, no retry
  *   R-PO-6 -1 vs 0 mapping
+ * and spec 0.1.70 (C354): an app whose latest claim/status does not declare app cap `person_op` (or whose `caps` are
+ * malformed) → 409 `person_op_unsupported`, nothing forwarded.
  */
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
@@ -17,6 +19,7 @@ import { PERSON_OP_RELAY } from "@opt2-tealbrick/spec/routes";
 import { forwardFailureStatus, MIN_POLL_INTERVAL_MS, RELAY_CONCURRENCY } from "../src/person-ops.ts";
 import { buildStatusReport } from "../src/portal.ts";
 import { jsonLogger } from "../src/util.ts";
+import { claimApp } from "./support/app-client.ts";
 import { INS, makeWorld, type World, waitFor } from "./support/world.ts";
 
 const rnd = (n = 18): string => randomBytes(n).toString("base64url");
@@ -54,6 +57,8 @@ describe("person-op relay (BRIDGE §15)", () => {
     dead = await closedOrigin();
     w = await makeWorld({ logger: jsonLogger((l) => lines.push(l)), extraOwnInfraOrigins: [dead] });
     await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.personOps.polls.length > 0, 15000);
+    // C354: the app declares it serves person ops
+    assert.equal((await claimApp(w, { claim: { caps: ["person_op"] } })).claimStatus, 200);
   });
   after(async () => {
     await w.close();
@@ -340,5 +345,65 @@ describe("forwardFailureStatus: -1 only for failures before the request was sent
     for (const e of [failure("ECONNRESET"), failure("UND_ERR_SOCKET"), new DOMException("The operation timed out.", "TimeoutError"), new TypeError("fetch failed", { cause: new Error("unexpected redirect") }), new Error("x"), undefined]) {
       assert.equal(forwardFailureStatus(e), 0, String(e));
     }
+  });
+});
+
+describe("person-op relay: app cap person_op, fail closed (spec 0.1.70, C354)", () => {
+  let w: World;
+  let app: Awaited<ReturnType<typeof claimApp>>;
+  before(async () => {
+    w = await makeWorld();
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.personOps.polls.length > 0, 15000);
+    app = await claimApp(w);
+    assert.equal(app.claimStatus, 200);
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  const refusedWithoutForward = async (why: string) => {
+    const from = w.personOpApp.seen.length;
+    const { pop } = enqueue(w);
+    const r = await resultOf(w, pop);
+    assert.equal(r.status, 409, why);
+    assert.equal((JSON.parse(r.body) as { error: { code: string } }).error.code, "person_op_unsupported", why);
+    await sleep(200);
+    assert.equal(w.personOpApp.seen.length, from, `${why}: zero requests to the app`);
+  };
+  const forwarded = async (why: string) => {
+    const from = w.personOpApp.seen.length;
+    const { pop } = enqueue(w);
+    assert.equal((await resultOf(w, pop)).status, 200, why);
+    assert.equal(w.personOpApp.seen.length, from + 1, why);
+  };
+
+  test("an app that declares no caps (claim without caps) → 409 person_op_unsupported, zero requests to the app", async () => {
+    await refusedWithoutForward("claim without caps");
+  });
+
+  test("malformed caps are no caps: a string, 17 entries, a 33-char entry, a non-string entry", async () => {
+    const filler = (n: number) => Array.from({ length: n }, (_, i) => `future_${i}`);
+    for (const [why, caps] of [
+      ["a string", "person_op"],
+      ["17 entries", ["person_op", ...filler(16)]],
+      ["a 33-char entry", ["person_op", "x".repeat(33)]],
+      ["a non-string entry", ["person_op", 7]],
+    ] as const) {
+      // a valid set first, so each malformed push really replaces stored caps
+      assert.equal(await app.status({ caps: ["person_op"] }), 200);
+      await forwarded(`valid caps before ${why}`);
+      assert.equal(await app.status({ caps }), 200);
+      await refusedWithoutForward(why);
+    }
+  });
+
+  test('["person_op", "future_cap"] → forwarded (unknown entries ignored); 16 entries and a 32-char entry are within the limits', async () => {
+    assert.equal(await app.status({ caps: ["person_op", "future_cap"] }), 200);
+    await forwarded("person_op + an unknown cap");
+    assert.equal(await app.status({ caps: ["person_op", "y".repeat(32), ...Array.from({ length: 14 }, (_, i) => `f${i}`)] }), 200);
+    await forwarded("16 entries, one of 32 chars");
+    // a later push without the cap withdraws it
+    assert.equal(await app.status({ caps: ["future_cap"] }), 200);
+    await refusedWithoutForward("cap withdrawn by a push");
   });
 });

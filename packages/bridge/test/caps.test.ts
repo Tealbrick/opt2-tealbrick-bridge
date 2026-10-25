@@ -18,6 +18,7 @@ import { BRIDGE_CAPS_DECLARED } from "../src/caps.ts";
 import { buildStatusReport } from "../src/portal.ts";
 import { trustFor } from "../src/table.ts";
 import { visibleOps } from "../src/tools.ts";
+import { claimApp } from "./support/app-client.ts";
 import { AGT, BRG, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -41,6 +42,8 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
   // BRIDGE §15: a row queued in Core is pulled, forwarded once to the app with its K14, and the app's answer is posted back;
   // the full behaviour is person-ops.test.ts
   person_ops: async (w) => {
+    // spec 0.1.70 (C354): only an app that declares app cap person_op gets person ops
+    assert.equal((await claimApp(w, { claim: { caps: ["person_op"] } })).claimStatus, 200);
     const pop = "pop_01HCAPSPROBE0000000000000";
     const from = w.personOpApp.seen.length;
     w.personOps.queue.push({ id: pop as never, ins: INS as never, op: "items_list", jws: "aGVhZA.Ym9keQ.c2ln" as never, body: "{}", expiresAt: new Date(Date.now() + 20_000).toISOString() as never });

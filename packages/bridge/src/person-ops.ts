@@ -7,7 +7,8 @@
  * - ONE long-poll `GET /bridge/person-ops?wait=25` with the bridge assertion; never in standalone mode (no K14 issuer).
  * - Result `status`: the app's HTTP status; -1 = not delivered (connect refused, DNS, TLS, before any byte was sent);
  *   0 = outcome unknown (timeout or a broken answer after sending, body over `maxOutputBytes`); 409 `instance_unknown`
- *   when `ins` is not in the current config (nothing forwarded).
+ *   when `ins` is not in the current config, 409 `person_op_unsupported` (spec 0.1.70, C354, fail closed) when the app's
+ *   latest claim/status does not declare app cap `person_op` (proof-caps.ts); nothing forwarded for either.
  * - No retries of the forward (one pop = at most one request to the app); the result post is retried once on a network error.
  * - Pause does not stop the relay (owner access by design, like person launch). Logs: pop, ins, op, status, ms only.
  */
@@ -29,6 +30,11 @@ const MAX_BATCH_BYTES = 2 * 1024 * 1024;
 const RESULT_TIMEOUT_MS = 5_000;
 /** pops already handled (memory): a row handed out twice is never forwarded twice */
 const SEEN_MAX = 512;
+
+/** spec 0.1.70 `PERSON_OP_BRIDGE_REFUSALS` (bridge.ts) and app cap `person_op` (`APP_CAPS`); literals while the pin is 0.1.64 */
+const REFUSED = { instanceUnknown: "instance_unknown", appUnsupported: "person_op_unsupported" } as const;
+const APP_CAP_PERSON_OP = "person_op";
+const refusal = (code: string, message: string) => ({ status: 409, body: JSON.stringify({ error: { code, message } }) });
 
 const POP_ID = /^pop_[0-9A-Za-z]{1,64}$/;
 const INS_ID = /^ins_[0-9A-Za-z]{1,64}$/;
@@ -163,7 +169,9 @@ async function relayOne(ctx: BridgeContext, item: BridgePersonOp): Promise<void>
   let result: { status: number; body: string };
   try {
     const app = ctx.table?.apps.get(item.ins);
-    if (!app) result = { status: 409, body: JSON.stringify({ error: { code: "instance_unknown", message: "the app instance is not in this bridge's config" } }) };
+    if (!app) result = refusal(REFUSED.instanceUnknown, "the app instance is not in this bridge's config");
+    // C354: a routing hint, fail closed: only an app that declares it serves person ops gets one
+    else if (!ctx.proofCaps.hasAppCap(item.ins, APP_CAP_PERSON_OP)) result = refusal(REFUSED.appUnsupported, "the app does not serve person ops");
     // BSD-07: an internalUrl outside the allow-list is never contacted
     else if (app.refused) result = { status: -1, body: "" };
     else result = await forward(ctx, app.entry.internalUrl, item);
