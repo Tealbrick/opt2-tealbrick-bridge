@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
+import { PERSONA_MAX_CHARS, PERSONA_PATTERN } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
@@ -21,6 +22,21 @@ import { nowS } from "./util.ts";
 export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 /** F57a / L21: Retry-After (seconds) on tool and companion calls refused while the bridge drains (nothing ran) */
 export const DRAIN_RETRY_AFTER_S = 2;
+/** spec 0.1.63 (bridge.ts `rejected` doc, BRIDGE §15.6): kind `config` + this code = a persona over PERSONA_MAX_CHARS, dropped */
+export const PERSONA_TOO_LONG = "persona_too_long";
+/** spec 0.1.68 (QA-SPEC49-14): kind `config` + this code = a persona that does not match PERSONA_PATTERN (spec 0.1.69, C356), dropped */
+export const PERSONA_INVALID = "persona_invalid";
+/** unicode mode: a surrogate PAIR (an emoji) is one code point and never matches the lone-surrogate range */
+const PERSONA_RE = new RegExp(PERSONA_PATTERN, "u");
+
+/**
+ * BRIDGE §15.6: why a config persona is dropped for its agent (never cut), or undefined when it is delivered. Core refuses
+ * both cases already; this is defence in depth.
+ */
+export function personaProblem(persona: string): typeof PERSONA_TOO_LONG | typeof PERSONA_INVALID | undefined {
+  if (persona.length > PERSONA_MAX_CHARS) return PERSONA_TOO_LONG;
+  return PERSONA_RE.test(persona) ? undefined : PERSONA_INVALID;
+}
 
 /**
  * BSD-08 (CREDENTIALS §9.5): the root channel this build pins. A build constant, never env (Portal sets env at
@@ -189,6 +205,12 @@ export class BridgeContext extends EventEmitter {
     this.table = next;
     // C268c: a config change of an app's digest, version or update candidate drops its hook proof capabilities, before any call uses the new table
     this.proofCaps.onTable(next, prev);
+    // BRIDGE §15.6: a persona over PERSONA_MAX_CHARS or outside PERSONA_PATTERN is dropped for that agent (mcp.ts) and
+    // counted once per table (the detail names the agent and the length, never the text)
+    for (const a of next.agents.values()) {
+      const problem = typeof a.persona === "string" ? personaProblem(a.persona) : undefined;
+      if (problem) this.reject({ kind: "config", code: problem, detail: `agent ${a.agt}: ${(a.persona as string).length} units` });
+    }
     this.emit("table", next, prev);
   }
 }

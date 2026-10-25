@@ -11,9 +11,10 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { bridgeCaps } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
+import { roleStatuses } from "./model-roles.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
+import { acceptedDigests, buildTable, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
@@ -404,7 +405,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       ...upgradeFields(h?.status),
     };
   });
-  const keys = (t?.config.keyRequirements ?? [])
+  const keys = (t ? keyRequirements(t) : [])
     .filter((k) => k.source === "account_default")
     .map((k) => ({ name: k.name, ins: k.ins, set: Object.hasOwn(ctx.state.keyStore.values, k.name) }));
   const connectionsCreated = [...ctx.state.connections.values()]
@@ -422,6 +423,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     portalKeysDigest: ctx.api.digest(id.portalKeys as unknown as Json),
     apps,
     keys,
+    // v0.1.63 (BRIDGE §15.5): one row per declared role per instance — labels only, never a base URL, key name or value
+    roles: roleStatuses(ctx),
     scopeSummaries: [...ctx.scopeSummaries.values()],
     connectionsCreated,
     // v0.1.14: connections that authenticated since the previous ACCEPTED report (latest time each, ≤ 500)

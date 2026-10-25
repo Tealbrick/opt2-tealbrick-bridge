@@ -40,10 +40,13 @@ export function statusFor(code: string): number {
     case "not_in_workflow":
     case "hook_denied":
     case "key_not_declared":
+    case "role_not_declared":
+    case "role_policy_too_low":
     case "dynamic_ceiling_exceeded":
       return 403;
     case "unknown_tool":
     case "key_not_set":
+    case "role_not_set":
     case "not_found":
       return 404;
     case "request_timeout":
@@ -219,7 +222,8 @@ export function sendError(res: ServerResponse, err: unknown, requestId: string, 
   // draining the rest of a slow or huge body
   const extra: Record<string, string> = res.req && !res.req.complete ? { connection: "close" } : {};
   if (code === "rate_limited" && !headers["retry-after"]) extra["retry-after"] = "1";
-  sendJson(res, status, envelope(code, message, requestId), { ...extra, ...headers });
+  const details = err instanceof BridgeError ? err.details : undefined;
+  sendJson(res, status, envelope(code, message, requestId, details), { ...extra, ...headers });
 }
 
 export function isRecord(v: unknown): v is Record<string, unknown> {

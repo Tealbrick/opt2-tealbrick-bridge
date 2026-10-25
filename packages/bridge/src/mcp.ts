@@ -1,7 +1,8 @@
 /**
  * MCP surface (BRIDGE §7): Streamable HTTP at /mcp (POST JSON-RPC, GET SSE for notifications,
  * DELETE ends the session). Tools come from grants; skills are resources + an instructions index +
- * the `<product>__tb_skills` fallback tool. Every request re-authenticates the agent (K5).
+ * the `<product>__tb_skills` fallback tool. Every request re-authenticates the agent (K5). v0.1.63 (BRIDGE §15.6): the
+ * agent's persona leads the instructions and is the resource `tb://agent/persona`.
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -10,9 +11,10 @@ import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec
 import { EVENT_MCP_METHODS, TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
+import { PERSONA_RESOURCE_URI } from "@opt2-tealbrick/spec/models";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { type CallRouter, RESOLVE_TTL_MS } from "./calls.ts";
-import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
+import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S, personaProblem } from "./context.ts";
 import { EVENT_POLL_LIMIT, isEventCursor, pollLimit } from "./events.ts";
 import { authenticateAgent, connectionState } from "./identity.ts";
 import { LIST_MAX_AGE_MS, MISS_MIN_AGE_MS, refreshScopeSummaryIfOlder } from "./scope-summary.ts";
@@ -233,6 +235,24 @@ export class McpServer {
     return t.config.skills.files.filter((f) => products.has(f.product));
   }
 
+  /** BRIDGE §15.6: the owner's persona of this agent; none for a paused (or unknown) agent, an empty, a too long or an invalid persona */
+  private persona(t: Table, agt: AgentId): string | undefined {
+    if (agentPausedOrEmpty(t, agt)) return undefined;
+    const p = t.agents.get(agt)?.persona;
+    // §15.6: a persona over the limit (UTF-16 units) or outside PERSONA_PATTERN is dropped, never cut; swapTable counts it
+    return typeof p === "string" && p.trim() && !personaProblem(p) ? p : undefined;
+  }
+
+  /** what `resources/list` shows this agent: its skills and its persona (a change of either → resources/list_changed) */
+  private resourcesDigest(t: Table, agt: AgentId): string {
+    const persona = this.persona(t, agt);
+    return this.ctx.api.digest(
+      this.skillsFor(t, agt)
+        .map((f) => `${f.product}/${f.id}`)
+        .concat(t.config.skills.digest, persona === undefined ? [] : [`persona:${this.ctx.api.digest(persona)}`]) as Json,
+    );
+  }
+
   private instructions(t: Table, agt: AgentId): string {
     if (agentPausedOrEmpty(t, agt)) return "Teal Brick: this agent is paused by the owner. No tools are available until the owner resumes it.";
     const lines = [
@@ -245,7 +265,9 @@ export class McpServer {
     }
     let out = lines.join("\n");
     if (Buffer.byteLength(out) > 4096) out = `${out.slice(0, 4000)}\n…`;
-    return out;
+    // §15.6: the persona comes first and is not cut by the 4 KB limit of the tools/skills part
+    const persona = this.persona(t, agt);
+    return persona === undefined ? out : `Your persona, set by the owner:\n${persona}\n\n${out}`;
   }
 
   private renderSkill(t: Table, agt: AgentId, product: string, id: string): string | undefined {
@@ -264,7 +286,7 @@ export class McpServer {
       try {
         const idx = await this.index(t, s.agt);
         const td = this.ctx.api.digest(idx.tools.map((x) => x.name) as Json);
-        const sd = this.ctx.api.digest(this.skillsFor(t, s.agt).map((f) => `${f.product}/${f.id}`).concat(t.config.skills.digest) as Json);
+        const sd = this.resourcesDigest(t, s.agt);
         if (s.toolDigest && td !== s.toolDigest) this.push(s, { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
         if (s.skillsDigest && sd !== s.skillsDigest) this.push(s, { jsonrpc: "2.0", method: "notifications/resources/list_changed" });
         s.toolDigest = td;
@@ -561,15 +583,24 @@ export class McpServer {
       }
       case "resources/list": {
         const files = this.skillsFor(t, p.agt);
-        s.skillsDigest = this.ctx.api.digest(files.map((f) => `${f.product}/${f.id}`).concat(t.config.skills.digest) as Json);
+        s.skillsDigest = this.resourcesDigest(t, p.agt);
+        const persona = this.persona(t, p.agt) === undefined ? [] : [{ uri: PERSONA_RESOURCE_URI, name: "persona", title: "Your persona", description: "The persona the owner set for this agent. Follow it.", mimeType: "text/markdown" }];
         return {
-          resources: files.map((f) => ({ uri: `${TOOL_NAME_RULE.skillUriPrefix}${f.product}/${f.id}`, name: `${f.product}/${f.id}`, title: f.title, description: f.when ?? f.title, mimeType: "text/markdown" })),
+          resources: [
+            ...persona,
+            ...files.map((f) => ({ uri: `${TOOL_NAME_RULE.skillUriPrefix}${f.product}/${f.id}`, name: `${f.product}/${f.id}`, title: f.title, description: f.when ?? f.title, mimeType: "text/markdown" })),
+          ],
         };
       }
       case "resources/templates/list":
         return { resourceTemplates: [] };
       case "resources/read": {
         const uri = typeof rpc.params?.uri === "string" ? rpc.params.uri : "";
+        if (uri === PERSONA_RESOURCE_URI) {
+          const persona = this.persona(t, p.agt);
+          if (persona === undefined) throw new RpcError(-32002, "resource not found");
+          return { contents: [{ uri, mimeType: "text/markdown", text: persona }] };
+        }
         const m = /^tealbrick:\/\/skills\/([a-z][a-z0-9-]{1,31})\/([a-z][a-z0-9-]{1,39})$/.exec(uri);
         if (!m || !grantedProducts(t, p.agt).has(m[1] as string)) throw new RpcError(-32002, "resource not found");
         const text = this.renderSkill(t, p.agt, m[1] as string, m[2] as string);

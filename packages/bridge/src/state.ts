@@ -1,6 +1,7 @@
 /**
  * Persistent bridge state on ONE volume (BRIDGE §1.2): S1 identity, S2 last good config, S3 sealed key
- * store, S4 pairing connections, S5 pending claims, S6 used one-time jtis, S9 standalone overlay.
+ * store, S4 pairing connections, S5 pending claims, S6 used one-time jtis, S9 standalone overlay, S11 model-role
+ * bindings + the owner's "Own hosts" (v0.1.63, BRIDGE §15.1 / §15.3; one `keysRev` with S3).
  *
  * Integrity (C62 BSD-03): every record except S2 is sealed with TB_KEK (AES-256-GCM, AAD = purpose + file),
  * so a planted or edited file is refused instead of trusted; S2 is a Portal-signed JWS and is verified on
@@ -15,7 +16,8 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { join } from "node:path";
 import type { Kek, ManifestApi } from "@opt2-tealbrick/relay";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
-import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, InstanceId, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
+import type { DataPolicy, ModelRole } from "@opt2-tealbrick/spec/models";
 import type { Ed25519KeyPair, PinnedKeySet } from "@opt2-tealbrick/spec/sdk";
 
 const isPinned = (v: unknown): v is PinnedKeySet =>
@@ -62,7 +64,47 @@ export interface StandaloneOverlay {
 
 export interface KeyStore {
   keysRev: number;
+  /**
+   * Requirement-named app keys under their requirement name; v0.1.63 owner-named provider keys (label ≤ 60, e.g.
+   * "OpenAI main") under {@link PROVIDER_KEY_PREFIX} + label. A requirement name never contains ":", so the two namespaces
+   * can never meet (QA-BRIDGE22-1): `GET /tb/v1/keys/<name>` serves only requirement keys, a role binding names its key
+   * exactly (`keyName`).
+   */
   values: Record<string, string>;
+}
+
+/** S3 namespace of owner-named provider keys (QA-BRIDGE22-1) */
+export const PROVIDER_KEY_PREFIX = "pk:";
+export const providerKeyName = (label: string): string => `${PROVIDER_KEY_PREFIX}${label}`;
+export const isProviderKeyName = (name: string): boolean => name.startsWith(PROVIDER_KEY_PREFIX);
+
+/** S11 (BRIDGE §15.1): one model-role binding. `ins` absent = workspace default; set = override for that app instance. */
+export interface ModelBinding {
+  role: ModelRole;
+  ins?: InstanceId;
+  /** MODEL_PROVIDERS id */
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  /** a name in S3 (`KeyStore.values`): `pk:<label>` of a provider key, or the requirement name of an app key the owner
+   *  chose; absent for a provider with `keyNeeded: false` or when the key was deleted */
+  keyName?: string;
+  dataPolicy: DataPolicy;
+  /** ISO time of the owner's zero-data-retention tick (`zdr` only) */
+  zdrAttestedAt?: string;
+  /** embeddings only */
+  dims?: number;
+}
+
+/**
+ * The S11 record. `rev` = the `keysRev` this write belongs to: the record is written before the key store, so a crash
+ * between the two writes is repaired at boot (keysRev = max of both) and apps still see the change.
+ */
+interface ModelsRecord {
+  rev: number;
+  bindings: ModelBinding[];
+  /** spec follow-up #49 (§15.3): origins the owner states are on their own network; absent in older records = none */
+  ownHosts?: string[];
 }
 
 /** Facts the status report must carry until Portal confirmed them (BSD-11): survive restarts. */
@@ -73,7 +115,7 @@ export interface PendingReports {
 }
 
 /** Every sealed record on the volume (`<name>.sealed.json`). S2 (config.jws) is a signed JWS, not sealed. */
-const RECORDS = ["identity", "connections", "claims", "jtis", "keys", "standalone", "reports", "enrol-refused"] as const;
+const RECORDS = ["identity", "connections", "claims", "jtis", "keys", "standalone", "reports", "enrol-refused", "models"] as const;
 type RecordName = (typeof RECORDS)[number];
 /** AAD = purpose + record; the key store keeps the AAD it has always had (its files must stay readable). */
 const aadOf = (name: RecordName): string => (name === "keys" ? "tb:seal:bridge-keys:store" : `tb:seal:bridge-state:${name}`);
@@ -131,6 +173,10 @@ export class BridgeState {
   /** S6: one-time jtis (pairing codes, keys tickets) until exp + leeway */
   usedJtis: Map<string, number> = new Map();
   keyStore: KeyStore = { keysRev: 0, values: {} };
+  /** S11 (v0.1.63): model-role bindings; values stay in S3 */
+  bindings: ModelBinding[] = [];
+  /** S11 (spec follow-up #49): the owner's "Own hosts" origins (normalized, model-roles.ts `ownHostOrigin`) */
+  ownHosts: string[] = [];
   standalone: StandaloneOverlay | undefined;
   reports: PendingReports = { revoked: [], pairingJtis: {} };
 
@@ -229,6 +275,14 @@ export class BridgeState {
     const now = nowS();
     for (const [jti, exp] of Object.entries(this.readRecord<Record<string, number>>("jtis") ?? {})) if (exp > now) this.usedJtis.set(jti, exp);
     this.keyStore = this.readRecord<KeyStore>("keys") ?? { keysRev: 0, values: {} };
+    const models = this.readRecord<ModelsRecord>("models");
+    this.bindings = models?.bindings ?? [];
+    this.ownHosts = models?.ownHosts ?? [];
+    // a crash after the S11 write and before the key store write: the change still gets its revision
+    if (models && models.rev > this.keyStore.keysRev) {
+      this.keyStore.keysRev = models.rev;
+      this.saveKeyStore();
+    }
     this.standalone = this.readRecord<StandaloneOverlay>("standalone");
     this.reports = this.readRecord<PendingReports>("reports") ?? { revoked: [], pairingJtis: {} };
     return resealed;
@@ -318,9 +372,46 @@ export class BridgeState {
     return true;
   }
 
+  /**
+   * Sets or deletes one key: a requirement name, or {@link providerKeyName} of an owner-named provider key. Deleting a
+   * key that bindings use leaves those bindings without a key (BRIDGE §15.2) in the same revision: one `keysRev` bump for
+   * the whole change.
+   */
   setKey(name: string, value: string | null): void {
     if (value === null) delete this.keyStore.values[name];
     else this.keyStore.values[name] = value;
+    const served = value === null && this.bindings.some((b) => b.keyName === name);
+    if (served)
+      this.saveBindings(
+        this.bindings.map((b) => {
+          if (b.keyName !== name) return b;
+          const { keyName: _k, ...unset } = b;
+          return unset;
+        }),
+      );
+    else this.bumpKeys();
+  }
+
+  /** Replaces the S11 bindings (BRIDGE §15.1); bumps `keysRev` once. */
+  saveBindings(next: ModelBinding[]): void {
+    this.saveModels(next, this.ownHosts);
+  }
+
+  /** Replaces the S11 "Own hosts" list (§15.3): it changes which bindings count as `local`, so it bumps `keysRev` once. */
+  saveOwnHosts(next: string[]): void {
+    this.saveModels(this.bindings, next);
+  }
+
+  private saveModels(bindings: ModelBinding[], ownHosts: string[]): void {
+    const rev = this.keyStore.keysRev + 1;
+    this.writeRecord("models", { rev, bindings, ...(ownHosts.length ? { ownHosts } : {}) } satisfies ModelsRecord);
+    this.bindings = bindings;
+    this.ownHosts = ownHosts;
+    this.keyStore.keysRev = rev;
+    this.saveKeyStore();
+  }
+
+  private bumpKeys(): void {
     this.keyStore.keysRev += 1;
     this.saveKeyStore();
   }

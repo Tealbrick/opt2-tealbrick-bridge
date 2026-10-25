@@ -1,0 +1,746 @@
+{
+  "source": "Copied from Tealbrick/opt2-tealbrick-specs#53 (branch spec/model-roles-c356) head 9f9f916, packages/spec/examples/local-check.cases.json (BRIDGE §15.3; 0.1.68's 135 rows + the backslash-only rows of QA-BRIDGE22-3). Placeholders so scripts/check-literals.ts passes (no tailnet DNS suffix or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100. The test restores them before use; every row is otherwise byte-identical to the spec.",
+  "description": "Spec follow-up (QA-SPEC49-1/-2/-6): BRIDGE §15.3 local check. kind base = a binding base URL → expect verified | owner_listed | not_local | refused (input hygiene, parse, scheme or transport); kind own_host = an Own hosts entry → accepted | accepted_warn_public | refused. `canonical` = the stored/served form (url.href) when it differs from the input or matters. `ownInfra` = the machine-managed TB_OWN_INFRA_ORIGINS for that row (BRIDGE §5.7). The bridge, the SDK (modelFetch) and tb-exec test against every row (RM-19).",
+  "cases": [
+    {
+      "kind": "base",
+      "input": "http://localhost:11434/v1",
+      "expect": "verified",
+      "canonical": "http://localhost:11434/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://LOCALHOST.:11434/v1",
+      "expect": "verified",
+      "canonical": "http://localhost.:11434/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://ollama.railway.internal:11434/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.5:11434/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://172.20.1.2/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://192.168.1.9:8080/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://2130706433/v1",
+      "expect": "verified",
+      "canonical": "http://127.0.0.1/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://[::ffff:10.0.0.1]/v1",
+      "expect": "verified",
+      "canonical": "http://[::ffff:a00:1]/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://[::1]:11434/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fc00::1]/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fd00:ec2::254]/",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://[fd00:ec2::254]/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://[::ffff:169.254.169.254]/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://169.254.169.254/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://{cgnat}.{cgnat}.{cgnat}.200/",
+      "expect": "not_local",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example",
+        "https://{cgnat}.{cgnat}.{cgnat}.200"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "https://192.0.0.192/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://168.63.129.16/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://0.1.2.3/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://metadata.google.internal/",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://{cgnat}.64.0.1:11434/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://{cgnat}.64.0.1:11434/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://{cgnat}.101.102.103:11434/v1",
+      "expect": "owner_listed",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "https://gpu.tail0000ex.{tsnet}/v1",
+      "expect": "owner_listed",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "http://gpu.tail0000ex.{tsnet}/v1",
+      "expect": "refused",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "https://other.{tsnet}/v1",
+      "expect": "not_local",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "https://ollama.home.example/v1",
+      "expect": "owner_listed",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "https://ollama.home.example:8443/v1",
+      "expect": "not_local",
+      "ownHosts": [
+        "https://gpu.tail0000ex.{tsnet}",
+        "http://{cgnat}.101.102.103:11434",
+        "https://ollama.home.example"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1\\@evil.example/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://user@10.0.0.1/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1 /v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1\t",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1?api-version=1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1#x",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "ftp://10.0.0.1/",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "not a url",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://10.0.0.1.nip.io/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://x.{tsnet}.example.com/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://api.openai.com/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://api.openai.com/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://8.8.8.8/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://XN--BCHER-KVA.example/v1",
+      "expect": "not_local",
+      "canonical": "https://xn--bcher-kva.example/v1"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://gpu.tail0000ex.{tsnet}",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.101.102.103:11434",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://gpu.tail0000ex.{tsnet}",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://gpu.tail0000ex.{tsnet}/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.{cgnat}.{cgnat}.200",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://metadata.google.internal",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[::ffff:a9fe:a9fe]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://8.8.8.8",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://8.8.8.8",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://user@host.example",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://172.16.0.0/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://172.31.255.255/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "https://172.15.255.255/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://172.32.0.0/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://172.32.0.0/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://192.168.0.0/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "https://192.167.255.255/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://192.169.0.0/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://{cgnat}.63.255.255/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://{cgnat}.128.0.0/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://{cgnat}.128.0.0/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://[fe00::1]/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://[fec0::1]/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fbff::1]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://[febf::1]/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://169.253.255.255/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://169.255.0.0/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://169.254.170.2/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://169.254.170.2/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://0.255.255.255/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://xrailway.internal/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://xrailway.internal/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://railway.internal/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://a.railway.internal.evil.com/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://a.railway.internal.evil.com/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://a.railway.internal./v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v\u00001",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://metadata.google.internal./v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://METADATA/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "https://Metadata.Google.Internal/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fd00:ec2:0:0:0:0:0:254]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://[fd00:ec2:0:0:0:0:0:254]/v1",
+      "expect": "not_local"
+    },
+    {
+      "kind": "base",
+      "input": "http://[::ffff:0:0]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://[::a00:1]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://[64:ff9b::a00:1]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://0x0a.0.0.1/v1",
+      "expect": "verified",
+      "canonical": "http://10.0.0.1/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://167772161/v1",
+      "expect": "verified",
+      "canonical": "http://10.0.0.1/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://012.0.0.1/v1",
+      "expect": "verified",
+      "canonical": "http://10.0.0.1/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.1/v1",
+      "expect": "verified",
+      "canonical": "http://10.0.0.1/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://１０.0.0.1/v1",
+      "expect": "verified",
+      "canonical": "http://10.0.0.1/v1"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fe80::1%25eth0]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://x.{tsnet}/v1",
+      "expect": "owner_listed",
+      "ownHosts": [
+        "https://X.{TSNET}:443/"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "http://tb-ollama:11434/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://tb-ollama:11434/v1",
+      "expect": "verified",
+      "ownInfra": [
+        "http://tb-ollama:11434"
+      ]
+    },
+    {
+      "kind": "base",
+      "input": "http://tb-ollama:11435/v1",
+      "expect": "refused",
+      "ownInfra": [
+        "http://tb-ollama:11434"
+      ]
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[2001:db8::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[2001:db8::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://metadata.google.internal.",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://Metadata.Google.Internal",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://x.{tsnet}/",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://x.{tsnet}:443",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://X.{TSNET}",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fd00:ec2::254]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://169.254.170.2",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fe80::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[febf::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fec0::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fe00::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://[fbff::1]",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fd00::1]",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fe00::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://[fbff::1]",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.127.255.255",
+      "expect": "accepted"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.128.0.1",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "http://{cgnat}.63.255.255",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://169.254.0.1",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://169.255.0.1",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://0.255.255.255",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://1.0.0.0",
+      "expect": "accepted_warn_public"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fd12:3456::1]:11434/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fdff:ffff::1]/v1",
+      "expect": "verified"
+    },
+    {
+      "kind": "base",
+      "input": "http://[fe00::1]/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1\u0001x",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1\u001f",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%40evil.example",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%5c@x",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1＠evil.example/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1＼evil",
+      "expect": "refused"
+    },
+    {
+      "kind": "own_host",
+      "input": "https://10.0.0.1%40evil.example",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%5Cevil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1%5cevil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1＠evil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1/v1﹫evil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1\\evil/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://api.example.com\\@evil/v1",
+      "expect": "refused"
+    }
+  ]
+}
