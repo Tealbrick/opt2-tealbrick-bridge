@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { signKeySetStatement } from "@opt2-tealbrick/manifest";
 import { type ManifestApi, manifestApi } from "@opt2-tealbrick/relay";
 import type { StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
+import type { BridgePersonOp, BridgePersonOpResultInput } from "@opt2-tealbrick/spec/routes";
 import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
 import type { McpLimits } from "../../src/mcp.ts";
 import { type ListenerLimits, type RunningBridge, startBridge } from "../../src/server.ts";
@@ -158,6 +159,14 @@ export interface World {
    * TB-Call proof) and the handler that answers (`[]` when none)
    */
   bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown; /** answer every bridge op with this HTTP status and no body */ status?: number };
+  /**
+   * BRIDGE §16 (spec 0.1.70): Core's person-op queue. `queue` rows are handed out by the next pull (taken at once, never twice);
+   * `polls` = pulls received (with their time); `results` = every result post, in order. `pollStatus` answers the pulls with
+   * that status (and `retryAfter`) instead; `dropResults` closes the socket of the next n result posts (a network error).
+   */
+  personOps: { queue: BridgePersonOp[]; polls: number[]; results: BridgePersonOpResultInput[]; pollStatus?: number; retryAfter?: string; dropResults: number };
+  /** the fake notes app's `POST /tb/v1/person-op`: every request (EXACT body bytes and headers), and the handler that answers (200 `{"ok":true}` when none) */
+  personOpApp: { seen: { raw: Buffer; headers: IncomingHttpHeaders }[]; handler?: (req: IncomingMessage, res: ServerResponse, raw: Buffer) => void };
 }
 
 export interface WorldOptions {
@@ -216,6 +225,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const appOps: World["appOps"] = {};
   const bridgeOps: World["bridgeOps"] = { seen: [] };
   const viewer: World["viewer"] = { seen: [] };
+  const personOps: World["personOps"] = { queue: [], polls: [], results: [], dropResults: 0 };
+  const personOpApp: World["personOpApp"] = { seen: [] };
   let down = false;
   let pulls = 0;
   let ackFails = false;
@@ -275,6 +286,14 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       if (bridgeOps.status !== undefined) return res.writeHead(bridgeOps.status).end();
       const custom = bridgeOps.answer?.(path, b);
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom !== undefined ? custom : []));
+    }
+    if (url.pathname === "/tb/v1/person-op" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks);
+      personOpApp.seen.push({ raw, headers: req.headers });
+      if (personOpApp.handler) return personOpApp.handler(req, res, raw);
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
     }
     if (url.pathname.startsWith("/v/notes/")) {
       viewer.seen.push({ url: req.url ?? "", headers: req.headers });
@@ -417,6 +436,28 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       if (rev > after) return res.writeHead(200, { "content-type": "application/jose" }).end(configJws);
       return res.writeHead(304).end();
     }
+    if (url.pathname === "/api/v1/bridge/person-ops" && req.method === "GET") {
+      personOps.polls.push(Date.now());
+      if (personOps.pollStatus !== undefined) return res.writeHead(personOps.pollStatus, personOps.retryAfter ? { "retry-after": personOps.retryAfter } : {}).end();
+      // a short long-poll: rows queued meanwhile are handed out at once. A pull whose client went away (a bridge that stopped
+      // or restarted mid-poll) takes nothing: its rows would be lost on a dead socket
+      const deadline = Date.now() + 300;
+      while (!personOps.queue.length && Date.now() < deadline && !req.socket.destroyed) await new Promise((r) => setTimeout(r, 25));
+      if (req.socket.destroyed) return;
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: personOps.queue.splice(0) }));
+    }
+    const resultPath = /^\/api\/v1\/bridge\/person-ops\/([^/]+)\/result$/.exec(url.pathname);
+    if (resultPath && req.method === "POST") {
+      if (personOps.dropResults > 0) {
+        personOps.dropResults -= 1;
+        req.socket.destroy();
+        return;
+      }
+      const b = JSON.parse(raw.toString("utf8")) as BridgePersonOpResultInput;
+      if (b.pop !== resultPath[1]) return res.writeHead(400).end();
+      personOps.results.push(b);
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+    }
     if (url.pathname === "/api/v1/bridge/ack" && ackFails) return res.writeHead(503).end();
     if (url.pathname === "/api/v1/bridge/ack") {
       acks.push(JSON.parse(raw.toString("utf8")));
@@ -503,6 +544,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     appOps,
     bridgeOps,
     viewer,
+    personOps,
+    personOpApp,
     publicRequests: (path) => seen.get(path) ?? 0,
     mcp,
     signPortal: sign,

@@ -28,21 +28,26 @@
  *  - `secret_output` (spec 0.1.68, MANIFEST M-OP-12) is NOT declared yet (C354, BRIDGE23-3): the secretOutput code paths are in
  *    (tools.ts `visibleOps`, calls.ts `route` / `forward`), but this build pins a manifest validator (0.1.30) that refuses a
  *    manifest with `secretOutput`, so no such app can run here. Declare it in the change that re-pins manifest >= 0.1.31.
+ *  - `person_ops` = the person-op relay, ALL of BRIDGE §16 (spec 0.1.71; since 0.1.64, C326, C354): the long-poll of queued person ops from Core,
+ *    one forward per op to the app's `POST /tb/v1/person-op` and the result post (person-ops.ts `runPersonOpRelay`).
+ *    Never in standalone mode: the relay does not run there (no K14 issuer), so re-minted slices leave it out.
+
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
 /** spec 0.1.68: `hook_tool` joins `BRIDGE_CAPS`; local until the spec pin carries it (`secret_output` waits for the manifest re-pin). */
 export type DeclaredCap = BridgeCap | "hook_tool";
 
-export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool"];
+export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool", "person_ops"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
- * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
+ * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes), without `person_ops` once
+ * the table is standalone (the relay has stopped). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined; table?: { standalone: boolean } | undefined }): BridgeCap[] {
   // spec 0.1.68: the wire type is the pinned BridgeCap until the re-pin; the wire schema takes any cap matching its pattern
-  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true) as BridgeCap[];
+  return BRIDGE_CAPS_DECLARED.filter((c) => (c !== "events" || ctx.events?.available === true) && (c !== "person_ops" || ctx.table?.standalone !== true)) as BridgeCap[];
 }
 
 /**

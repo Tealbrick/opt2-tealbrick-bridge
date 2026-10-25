@@ -250,8 +250,9 @@ export class InternalApi {
       ctx.state.claims.splice(ctx.state.claims.indexOf(record), 1);
       throw e;
     }
-    // C268c: an APP-INSTANCE claim sets the hook proof capabilities (the claim's set); a companion service claim never does
-    if (!service) ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
+    // C268c: an APP-INSTANCE claim sets the hook proof capabilities (the claim's set); a companion service claim never does.
+    // spec 0.1.70 (C354): the app caps (`caps`) the same way
+    if (!service) ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims, r.caps);
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
     sendJson(res, 200, out);
@@ -270,7 +271,7 @@ export class InternalApi {
       // C268c: an authenticated push of the app instance (a service push never gets here) states its proof capabilities
       // S3-1: only a push of the version the config names (serving or update candidate) and not older than the last accepted one
       const entry = ctx.table?.apps.get(caller.ins)?.entry;
-      ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims, caller.iat, entry ? [entry.version, entry.candidateVersion] : []);
+      ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims, caller.iat, entry ? [entry.version, entry.candidateVersion] : [], body.caps);
       if (!prev || prev.status.scopesRev !== body.scopesRev) void refreshScopeSummary(this.ctx, this.router, caller.ins, true);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
       // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)

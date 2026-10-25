@@ -17,7 +17,13 @@
  * hook ends `hook_failed` until its first push.
  *
  * In memory: after a bridge restart the set is empty (no `bd`, which every verifier accepts) until the app's next push.
+ *
+ * App caps (spec 0.1.70, C354): what an app SERVES (`ClaimRequest.caps`, every `AppStatus.caps`; `person_op` = it serves
+ * `POST /tb/v1/person-op`) are stored with the proof claims under the same rules (claim, accepted push, config change). A routing
+ * hint only, never an authority: the person-op relay forwards only to an app whose stored caps list `person_op` (fail closed).
+ * A value that is not an array of strings within the limits is NO caps; unknown entries are ignored.
  */
+import { APP_CAPS, APP_CAPS_LIMITS } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { Table } from "./table.ts";
 
@@ -31,19 +37,39 @@ export function knownProofClaims(v: unknown): ReadonlySet<string> {
   return out;
 }
 
+const KNOWN_APP_CAPS: readonly string[] = APP_CAPS;
+const APP_CAPS_MAX_ENTRIES: number = APP_CAPS_LIMITS.maxEntries;
+const APP_CAPS_MAX_LENGTH: number = APP_CAPS_LIMITS.maxLength;
+
+/**
+ * The known entries of a claim/push `caps` member; a non-array, a non-string entry, over 16 entries or an entry over 32
+ * characters (Unicode code points, not UTF-16 units): none. Entries match exactly (no case folding, no trimming).
+ */
+export function knownAppCaps(v: unknown): ReadonlySet<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(v) || v.length > APP_CAPS_MAX_ENTRIES || v.some((e) => typeof e !== "string" || Array.from(e).length > APP_CAPS_MAX_LENGTH)) return out;
+  for (const e of v as string[]) if (KNOWN_APP_CAPS.includes(e)) out.add(e);
+  return out;
+}
+
 const same = (a: ReadonlySet<string>, b: ReadonlySet<string>): boolean => a.size === b.size && [...a].every((x) => b.has(x));
 
 export class ProofCaps {
-  private readonly byIns = new Map<InstanceId, { version: string | undefined; caps: ReadonlySet<string>; iat?: number }>();
+  private readonly byIns = new Map<InstanceId, { version: string | undefined; caps: ReadonlySet<string>; appCaps: ReadonlySet<string>; iat?: number }>();
 
   /** does the stored set of this app instance list `bd`? */
   hasBd(ins: InstanceId): boolean {
     return this.byIns.get(ins)?.caps.has("bd") ?? false;
   }
 
-  /** a (re-)claim of the app instance: the claim's set replaces whatever was stored */
-  onClaim(ins: InstanceId, version: unknown, proofClaims: unknown): void {
-    this.byIns.set(ins, { version: typeof version === "string" ? version : undefined, caps: knownProofClaims(proofClaims) });
+  /** does the stored app cap set of this app instance list `cap` (spec 0.1.70 APP_CAPS)? */
+  hasAppCap(ins: InstanceId, cap: string): boolean {
+    return this.byIns.get(ins)?.appCaps.has(cap) ?? false;
+  }
+
+  /** a (re-)claim of the app instance: the claim's sets replace whatever was stored */
+  onClaim(ins: InstanceId, version: unknown, proofClaims: unknown, appCaps?: unknown): void {
+    this.byIns.set(ins, { version: typeof version === "string" ? version : undefined, caps: knownProofClaims(proofClaims), appCaps: knownAppCaps(appCaps) });
   }
 
   /**
@@ -53,17 +79,18 @@ export class ProofCaps {
    * the stored set stays: a network attacker who holds back an old push (up to its 60 s validity) and delivers it after an update
    * cannot take `bd` away.
    */
-  onStatus(ins: InstanceId, version: unknown, proofClaims: unknown, iat: number, allowedVersions: readonly (string | undefined)[]): void {
+  onStatus(ins: InstanceId, version: unknown, proofClaims: unknown, iat: number, allowedVersions: readonly (string | undefined)[], appCaps?: unknown): void {
     const v = typeof version === "string" ? version : undefined;
     if (v === undefined || !allowedVersions.includes(v)) return;
     const caps = knownProofClaims(proofClaims);
+    const app = knownAppCaps(appCaps);
     const stored = this.byIns.get(ins);
     if (stored?.iat !== undefined && iat < stored.iat) return;
-    if (!stored ? caps.size === 0 : stored.version === v && same(stored.caps, caps)) {
+    if (!stored ? caps.size === 0 && app.size === 0 : stored.version === v && same(stored.caps, caps) && same(stored.appCaps, app)) {
       if (stored) stored.iat = iat;
       return;
     }
-    this.byIns.set(ins, { version: v, caps, iat });
+    this.byIns.set(ins, { version: v, caps, appCaps: app, iat });
   }
 
   /** a new table: an app whose manifest digest, version or update candidate changed (or that left the config) loses its set */
