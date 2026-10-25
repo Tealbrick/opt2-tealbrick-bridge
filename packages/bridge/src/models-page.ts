@@ -28,7 +28,7 @@ import {
   servable,
 } from "./model-roles.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type PageApp, pageApp } from "./pages.ts";
-import type { ModelBinding } from "./state.ts";
+import { isProviderKeyName, type ModelBinding, PROVIDER_KEY_PREFIX, providerKeyName } from "./state.ts";
 import type { Table } from "./table.ts";
 
 /** a suggested binding from the ticket (K11 `roles[]`): shown, never stored without the owner's submit */
@@ -138,12 +138,21 @@ const hidden = (fields: Record<string, string>) =>
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`)
     .join("");
 
+/** the labels of the owner-named provider keys (their own S3 namespace, QA-BRIDGE22-1), sorted */
+const providerLabels = (ctx: BridgeContext): string[] =>
+  Object.keys(ctx.state.keyStore.values)
+    .filter(isProviderKeyName)
+    .map((k) => k.slice(PROVIDER_KEY_PREFIX.length))
+    .sort();
+
+/** a key name as the page shows it: a provider key by its label */
+const keyLabel = (name: string): string => (isProviderKeyName(name) ? name.slice(PROVIDER_KEY_PREFIX.length) : name);
+
 /** The provider-keys section (always shown: a key can be named before any app asks for a model). */
 export function renderProviderKeys(ctx: BridgeContext, t: Table, csrf: string): string {
-  const names = [...(ctx.state.keyStore.providerKeys ?? [])].filter((n) => Object.hasOwn(ctx.state.keyStore.values, n));
-  const rows = names
+  const rows = providerLabels(ctx)
     .map((n, i) => {
-      const serves = servesText(ctx, t, n);
+      const serves = servesText(ctx, t, providerKeyName(n));
       const f = hidden({ csrf, label: n });
       return `
   <section class="bp-key" aria-labelledby="pk-${i}">
@@ -161,14 +170,10 @@ export function renderProviderKeys(ctx: BridgeContext, t: Table, csrf: string): 
   </section>`;
 }
 
-/** key choices: owner-named provider keys, then app keys that are set */
-function keyOptions(ctx: BridgeContext, t: Table, selected: string | undefined): string {
-  const values = ctx.state.keyStore.values;
-  const named = new Set(ctx.state.keyStore.providerKeys ?? []);
-  const appKeys = new Map<string, string>();
-  for (const k of t.config.keyRequirements) if (k.source === "account_default" && Object.hasOwn(values, k.name) && !named.has(k.name)) appKeys.set(k.name, k.label);
+/** key choices: the owner-named provider keys only (value `pk:<label>`); a requirement key never satisfies a binding (spec 0.1.69) */
+function keyOptions(ctx: BridgeContext, selected: string | undefined): string {
   const opt = (v: string, label: string) => `<option value="${esc(v)}"${v === selected ? " selected" : ""}>${esc(label)}</option>`;
-  return [opt("", "No key"), ...[...named].filter((n) => Object.hasOwn(values, n)).map((n) => opt(n, n)), ...[...appKeys].map(([n, l]) => opt(n, `${l} (app key)`))].join("");
+  return [opt("", "No key"), ...providerLabels(ctx).map((n) => opt(providerKeyName(n), n))].join("");
 }
 
 /** provider choices for a role; local providers first (C336 Q3) */
@@ -206,7 +211,7 @@ function bindingForm(ctx: BridgeContext, t: Table, csrf: string, v: RoleView, id
       ${field("provider", "Provider", `<select class="tb-select-native" id="${id}-provider" name="provider" required>${opts}</select>`)}
       ${field("model", "Model", `<input class="tb-input" id="${id}-model" name="model" maxlength="${MODEL_MAX}" autocomplete="off" required value="${esc(init.model ?? "")}">`)}
       ${field("baseUrl", "Base URL", `<input class="tb-input" id="${id}-baseUrl" name="baseUrl" maxlength="${URL_MAX}" autocomplete="off" inputmode="url" value="${esc(init.baseUrl ?? "")}">`, "Leave empty to use the provider's own address. Own servers need one.")}
-      ${field("keyName", "Key", `<select class="tb-select-native" id="${id}-keyName" name="keyName">${keyOptions(ctx, t, init.keyName)}</select>`, "Own-server providers need no key.")}
+      ${field("keyName", "Key", `<select class="tb-select-native" id="${id}-keyName" name="keyName">${keyOptions(ctx, init.keyName)}</select>`, "A provider key from the section above. Own-server providers need no key.")}
       ${field("dataPolicy", "Data policy", `<select class="tb-select-native" id="${id}-dataPolicy" name="dataPolicy">${pol}</select>`, `Local needs an address on your own network. ${POLICY_LABEL.zdr}: ${zdrNames.join(", ") || "no provider for this role"}; the bridge cannot check a contract. For a gateway (OpenRouter, LiteLLM, a custom address) you confirm on the next page, naming its host.`)}
       <label class="tb-check"><input type="checkbox" name="zdr" value="1"> ${esc(ZDR_TICK)}</label>${
         v.role === "embeddings"
@@ -218,7 +223,8 @@ function bindingForm(ctx: BridgeContext, t: Table, csrf: string, v: RoleView, id
 
 function bindingText(ctx: BridgeContext, b: ModelBinding): string {
   const p = providerById(b.provider);
-  const key = p && !p.keyNeeded ? "no key" : b.keyName && Object.hasOwn(ctx.state.keyStore.values, b.keyName) ? `key ${b.keyName}` : "key not set";
+  // a binding that names no provider key (deleted, or an app key from the earlier 0.2.8 shape): the owner picks one
+  const key = p && !p.keyNeeded ? "no key" : boundKey(b, ctx.state.keyStore.values) !== undefined && b.keyName ? `key ${keyLabel(b.keyName)}` : "key missing";
   return [p?.label ?? b.provider, b.model, baseUrlOf(b) ?? "no address", key, policyText(effectivePolicy(b, ownNet(ctx)))].join(" · ");
 }
 
@@ -306,7 +312,7 @@ const refused = (code: string, reason: string): ModelsOutcome => ({ kind: "refus
 /** Applies a models post (`action` pkey | pkey_delete | bind | unbind); undefined = not a models action. */
 export function applyModelsPost(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome | undefined {
   const action = form.get("action");
-  if (action === "pkey") return saveProviderKey(ctx, t, form);
+  if (action === "pkey") return saveProviderKey(ctx, form);
   if (action === "pkey_delete") return deleteProviderKey(ctx, t, form);
   if (action === "bind") return bind(ctx, t, form);
   if (action === "unbind") return unbind(ctx, t, form);
@@ -315,29 +321,29 @@ export function applyModelsPost(ctx: BridgeContext, t: Table, form: URLSearchPar
   return undefined;
 }
 
-function saveProviderKey(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome {
+function saveProviderKey(ctx: BridgeContext, form: URLSearchParams): ModelsOutcome {
   const label = (form.get("label") ?? "").trim();
   const value = (form.get("value") ?? "").trim();
   const store = ctx.state.keyStore;
-  const named = store.providerKeys ?? [];
+  const named = providerLabels(ctx);
   if (!label || label.length > PROVIDER_KEY_LABEL_MAX || CONTROL.test(label)) return refused("label_invalid", `the name must be 1 to ${PROVIDER_KEY_LABEL_MAX} characters.`);
-  if (t.config.keyRequirements.some((k) => k.name === label) || (Object.hasOwn(store.values, label) && !named.includes(label))) return refused("label_taken", "an app key already has this name. Choose another name.");
   if (!named.includes(label) && named.length >= PROVIDER_KEYS_MAX) return refused("too_many_keys", `at most ${PROVIDER_KEYS_MAX} provider keys.`);
   if (!value) return refused("empty_value", "enter a value.");
   if (Buffer.byteLength(value) > VALUE_MAX_BYTES) return refused("too_large", "the value is too large (at most 16 KB).");
-  ctx.state.setKey(label, value, true);
+  // its own namespace (QA-BRIDGE22-1): a label equal to an app key name never reaches that app
+  ctx.state.setKey(providerKeyName(label), value);
   ctx.log.info("bridge.models.key_saved", { keysRev: store.keysRev });
   return { kind: "saved", flash: `Saved ${label}.` };
 }
 
 function deleteProviderKey(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome {
   const label = form.get("label") ?? "";
-  if (!(ctx.state.keyStore.providerKeys ?? []).includes(label)) return refused("unknown_key", "this key does not exist.");
+  if (!Object.hasOwn(ctx.state.keyStore.values, providerKeyName(label))) return refused("unknown_key", "this key does not exist.");
   if (form.get("confirm") !== "1") {
-    const q = deleteQuestion(ctx, t, label, label, { action: "pkey_delete", label });
+    const q = deleteQuestion(ctx, t, providerKeyName(label), label, { action: "pkey_delete", label });
     if (q) return q;
   }
-  ctx.state.setKey(label, null);
+  ctx.state.setKey(providerKeyName(label), null);
   ctx.log.info("bridge.models.key_deleted", { keysRev: ctx.state.keyStore.keysRev });
   return { kind: "saved", flash: `Deleted ${label}.` };
 }
@@ -364,7 +370,8 @@ function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcom
   const url = checked.href;
   const local = checked.cls !== "not_local";
   const keyName = provider.keyNeeded ? (form.get("keyName") ?? "") || undefined : undefined;
-  if (keyName && !Object.hasOwn(ctx.state.keyStore.values, keyName)) return refused("key_unknown", "choose a key from the list.");
+  // a provider key only: a requirement (app) key never satisfies a binding (spec 0.1.69, QA-BRIDGE22-1)
+  if (keyName && (!isProviderKeyName(keyName) || !Object.hasOwn(ctx.state.keyStore.values, keyName))) return refused("key_unknown", "choose a provider key from the list.");
   const asked = form.get("dataPolicy") ?? "";
   if (asked && !isDataPolicy(asked)) return refused("policy_invalid", "choose a data policy from the list.");
   const dataPolicy: DataPolicy = asked ? (asked as DataPolicy) : local ? "local" : "standard";

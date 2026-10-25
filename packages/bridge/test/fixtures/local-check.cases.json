@@ -1,5 +1,5 @@
 {
-  "source": "Copied from Tealbrick/opt2-tealbrick-specs#49 head 8db2b9a, packages/spec/examples/local-check.cases.json (BRIDGE §15.3). Placeholders so scripts/check-literals.ts passes (no tailnet DNS suffix or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100. The test restores them before use; every row is otherwise byte-identical to the spec.",
+  "source": "Copied from Tealbrick/opt2-tealbrick-specs#53 (branch spec/model-roles-c356) head 9f9f916, packages/spec/examples/local-check.cases.json (BRIDGE §15.3; 0.1.68's 135 rows + the backslash-only rows of QA-BRIDGE22-3). Placeholders so scripts/check-literals.ts passes (no tailnet DNS suffix or tailnet-range IPs in this repo): '{tsnet}' / '{TSNET}' = the tailnet DNS suffix in lower / upper case, '{cgnat}' = the first octet 100. The test restores them before use; every row is otherwise byte-identical to the spec.",
   "description": "Spec follow-up (QA-SPEC49-1/-2/-6): BRIDGE §15.3 local check. kind base = a binding base URL → expect verified | owner_listed | not_local | refused (input hygiene, parse, scheme or transport); kind own_host = an Own hosts entry → accepted | accepted_warn_public | refused. `canonical` = the stored/served form (url.href) when it differs from the input or matters. `ownInfra` = the machine-managed TB_OWN_INFRA_ORIGINS for that row (BRIDGE §5.7). The bridge, the SDK (modelFetch) and tb-exec test against every row (RM-19).",
   "cases": [
     {
@@ -730,6 +730,16 @@
     {
       "kind": "base",
       "input": "http://10.0.0.1/v1﹫evil",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "http://10.0.0.1\\evil/v1",
+      "expect": "refused"
+    },
+    {
+      "kind": "base",
+      "input": "https://api.example.com\\@evil/v1",
       "expect": "refused"
     }
   ]

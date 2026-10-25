@@ -64,13 +64,21 @@ export interface StandaloneOverlay {
 
 export interface KeyStore {
   keysRev: number;
-  values: Record<string, string>;
   /**
-   * v0.1.63 (BRIDGE §15.1): which names in `values` are owner-named provider keys (label ≤ 60, e.g. "OpenAI main"); the
-   * other names are requirement names. Absent on volumes of older bridges = none.
+   * Requirement-named app keys under their requirement name; v0.1.63 owner-named provider keys (label ≤ 60, e.g.
+   * "OpenAI main") under {@link PROVIDER_KEY_PREFIX} + label. A requirement name never contains ":", so the two namespaces
+   * can never meet (QA-BRIDGE22-1): `GET /tb/v1/keys/<name>` serves only requirement keys, a role binding names its key
+   * exactly (`keyName`).
    */
+  values: Record<string, string>;
+  /** the earlier 0.2.8 shape (provider labels stored bare in `values`): read once by {@link BridgeState.load}, never written */
   providerKeys?: string[];
 }
+
+/** S3 namespace of owner-named provider keys (QA-BRIDGE22-1) */
+export const PROVIDER_KEY_PREFIX = "pk:";
+export const providerKeyName = (label: string): string => `${PROVIDER_KEY_PREFIX}${label}`;
+export const isProviderKeyName = (name: string): boolean => name.startsWith(PROVIDER_KEY_PREFIX);
 
 /** S11 (BRIDGE §15.1): one model-role binding. `ins` absent = workspace default; set = override for that app instance. */
 export interface ModelBinding {
@@ -80,7 +88,8 @@ export interface ModelBinding {
   provider: string;
   model: string;
   baseUrl?: string;
-  /** a name in S3 (`KeyStore.values`); absent for a provider with `keyNeeded: false` or when the key was deleted */
+  /** a name in S3 (`KeyStore.values`): `pk:<label>` of a provider key, or the requirement name of an app key the owner
+   *  chose; absent for a provider with `keyNeeded: false` or when the key was deleted */
   keyName?: string;
   dataPolicy: DataPolicy;
   /** ISO time of the owner's zero-data-retention tick (`zdr` only) */
@@ -276,6 +285,7 @@ export class BridgeState {
       this.keyStore.keysRev = models.rev;
       this.saveKeyStore();
     }
+    this.migrateProviderKeys();
     this.standalone = this.readRecord<StandaloneOverlay>("standalone");
     this.reports = this.readRecord<PendingReports>("reports") ?? { revoked: [], pairingJtis: {} };
     return resealed;
@@ -366,19 +376,35 @@ export class BridgeState {
   }
 
   /**
-   * Sets or deletes one key. `provider` marks an owner-named provider key (v0.1.63). Deleting a key that bindings use
-   * leaves those bindings without a key (BRIDGE §15.2) in the same revision: one `keysRev` bump for the whole change.
+   * QA-BRIDGE22-1: an earlier 0.2.8 volume kept provider labels bare in `values` (listed in `providerKeys`), so a later app
+   * requirement with the same name read the owner's provider key. Move each one to its own namespace and point the
+   * bindings that named it there; one write of S11 + S3 and one `keysRev` bump (apps re-fetch). Idempotent: a crash
+   * between the two writes repeats it on the next start.
    */
-  setKey(name: string, value: string | null, provider = false): void {
-    const named = new Set(this.keyStore.providerKeys ?? []);
-    if (value === null) {
-      delete this.keyStore.values[name];
-      named.delete(name);
-    } else {
-      this.keyStore.values[name] = value;
-      if (provider) named.add(name);
+  private migrateProviderKeys(): void {
+    const legacy = this.keyStore.providerKeys;
+    if (!legacy) return;
+    const values = { ...this.keyStore.values };
+    for (const label of legacy) {
+      if (!Object.hasOwn(values, label)) continue;
+      values[providerKeyName(label)] = values[label] as string;
+      delete values[label];
     }
-    if (named.size || this.keyStore.providerKeys) this.keyStore.providerKeys = [...named].sort();
+    const moved = new Set(legacy);
+    const bindings = this.bindings.map((b) => (b.keyName && moved.has(b.keyName) ? { ...b, keyName: providerKeyName(b.keyName) } : b));
+    this.keyStore.values = values;
+    delete this.keyStore.providerKeys;
+    this.saveModels(bindings, this.ownHosts);
+  }
+
+  /**
+   * Sets or deletes one key: a requirement name, or {@link providerKeyName} of an owner-named provider key. Deleting a
+   * key that bindings use leaves those bindings without a key (BRIDGE §15.2) in the same revision: one `keysRev` bump for
+   * the whole change.
+   */
+  setKey(name: string, value: string | null): void {
+    if (value === null) delete this.keyStore.values[name];
+    else this.keyStore.values[name] = value;
     const served = value === null && this.bindings.some((b) => b.keyName === name);
     if (served)
       this.saveBindings(

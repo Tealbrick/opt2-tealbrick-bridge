@@ -9,7 +9,7 @@ import type { ModelRoleFetchResponse, ModelRoleRequirementEntry, ModelRoleStatus
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_PROVIDERS, MODEL_ROLES, type ModelProvider, type ModelRole, NEVER_LOCAL_HOSTNAMES, type PolicyBasis } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
-import type { ModelBinding } from "./state.ts";
+import { isProviderKeyName, type ModelBinding } from "./state.ts";
 import type { Table } from "./table.ts";
 import { BridgeError } from "./util.ts";
 
@@ -204,12 +204,16 @@ export function resolveBinding(bindings: readonly ModelBinding[], ins: InstanceI
   return bindings.find((b) => b.role === role && b.ins === ins) ?? bindings.find((b) => b.role === role && !b.ins);
 }
 
-/** The bound key's value: null for a provider without keys; undefined when a needed key is not set (or the provider is unknown). */
+/**
+ * The bound key's value: null for a provider without keys; undefined when a needed key is missing — not set, the provider
+ * unknown, or the binding names something that is not a provider key (spec 0.1.69 / QA-BRIDGE22-1: a requirement key never
+ * satisfies a binding, e.g. a binding stored by the earlier 0.2.8 shape that names an app key).
+ */
 export function boundKey(b: ModelBinding, values: Readonly<Record<string, string>>): string | null | undefined {
   const p = providerById(b.provider);
   if (!p) return undefined;
   if (!p.keyNeeded) return null;
-  return b.keyName && Object.hasOwn(values, b.keyName) ? values[b.keyName] : undefined;
+  return b.keyName && isProviderKeyName(b.keyName) && Object.hasOwn(values, b.keyName) ? values[b.keyName] : undefined;
 }
 
 /**

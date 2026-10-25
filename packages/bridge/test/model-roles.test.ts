@@ -93,7 +93,8 @@ const LOCAL_CASES: LocalCase[] = (JSON.parse(readFileSync(new URL("./fixtures/lo
 
 describe("BRIDGE §15.3 local check (RM-3, unit; spec follow-up #49)", () => {
   test("every row of the spec fixture local-check.cases.json gives its expected class and canonical form", () => {
-    assert.equal(LOCAL_CASES.length, 135, "all rows of specs#49 8db2b9a");
+    assert.equal(LOCAL_CASES.length, 137, "all rows of specs#53 9f9f916");
+    assert.ok(LOCAL_CASES.some((c) => c.input === "http://10.0.0.1\\evil/v1" && c.expect === "refused"), "the backslash-only row (QA-BRIDGE22-3)");
     for (const c of LOCAL_CASES) {
       const label = `${c.kind} ${JSON.stringify(c.input)}`;
       if (c.kind === "own_host") {
@@ -158,10 +159,10 @@ describe("RM-2 resolve order (unit): 9 binding × minPolicy pairs, key after pol
   const at = new Date().toISOString();
   const BIND: Record<DataPolicy, ModelBinding> = {
     local: { role: "reasoning", provider: "ollama", model: "llama3", baseUrl: "http://10.0.0.5:11434", dataPolicy: "local" },
-    zdr: { role: "reasoning", provider: "openai", model: "gpt-z", keyName: "K", dataPolicy: "zdr", zdrAttestedAt: at },
-    standard: { role: "reasoning", provider: "openai", model: "gpt-s", keyName: "K", dataPolicy: "standard" },
+    zdr: { role: "reasoning", provider: "openai", model: "gpt-z", keyName: "pk:K", dataPolicy: "zdr", zdrAttestedAt: at },
+    standard: { role: "reasoning", provider: "openai", model: "gpt-s", keyName: "pk:K", dataPolicy: "standard" },
   };
-  const run = (bindings: ModelBinding[], minPolicy: DataPolicy, values: Record<string, string> = { K: "v" }, ins = INS, ownHosts: string[] = []) => {
+  const run = (bindings: ModelBinding[], minPolicy: DataPolicy, values: Record<string, string> = { "pk:K": "v" }, ins = INS, ownHosts: string[] = []) => {
     const t = { config: { modelRoleRequirements: [{ role: "reasoning", ins, product: "notes", required: true, minPolicy, usedBy: ["app"] }] }, apps: new Map([[ins, {}]]) } as never;
     const ctx = { state: { bindings, ownHosts, keyStore: { keysRev: 7, values } }, ownInfraOrigins: [] } as never;
     try {
@@ -182,7 +183,7 @@ describe("RM-2 resolve order (unit): 9 binding × minPolicy pairs, key after pol
     assert.equal((run([BIND.standard], "zdr", {}) as { code: string }).code, "role_policy_too_low", "key unset AND policy too low → policy");
     assert.equal((run([BIND.zdr], "zdr", {}) as { code: string }).code, "role_not_set", "policy ok, key unset → role_not_set");
     const both = [BIND.zdr, { ...BIND.standard, ins: INS2 as never }];
-    assert.equal((run(both, "zdr", { K: "v" }, INS2) as { code: string }).code, "role_policy_too_low", "the override is used, never the default");
+    assert.equal((run(both, "zdr", { "pk:K": "v" }, INS2) as { code: string }).code, "role_policy_too_low", "the override is used, never the default");
     assert.equal((run(both, "zdr") as { model: string }).model, "gpt-z", "the other instance keeps the default");
   });
   test("an http binding whose host stopped being local is not served (role_not_set), whatever the policy", () => {
@@ -242,11 +243,11 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
 
   test("RM-2 / RM-4: one provider key serves three roles; declared + set → the binding; replacing the key bumps keysRev once", async () => {
     assert.equal((await h.post({ action: "pkey", label: "OpenAI main", value: " sk-rm-one\n" })).status, 303);
-    assert.equal(store().values["OpenAI main"], "sk-rm-one");
-    assert.deepEqual(store().providerKeys, ["OpenAI main"]);
-    assert.equal((await bind({ role: "reasoning", provider: "openai", model: "gpt-test", keyName: "OpenAI main", dataPolicy: "standard" })).status, 303);
-    assert.equal((await bind({ role: "utility", provider: "openai", model: "gpt-mini", keyName: "OpenAI main" })).status, 303);
-    assert.equal((await bind({ role: "summarize", provider: "openai", model: "gpt-zdr", keyName: "OpenAI main", dataPolicy: "zdr", zdr: "1" })).status, 303);
+    assert.equal(store().values["pk:OpenAI main"], "sk-rm-one");
+    assert.ok(!Object.hasOwn(store().values, "OpenAI main"), "a provider key lives in its own namespace (QA-BRIDGE22-1)");
+    assert.equal((await bind({ role: "reasoning", provider: "openai", model: "gpt-test", keyName: "pk:OpenAI main", dataPolicy: "standard" })).status, 303);
+    assert.equal((await bind({ role: "utility", provider: "openai", model: "gpt-mini", keyName: "pk:OpenAI main" })).status, 303);
+    assert.equal((await bind({ role: "summarize", provider: "openai", model: "gpt-zdr", keyName: "pk:OpenAI main", dataPolicy: "zdr", zdr: "1" })).status, 303);
     assert.ok(w.bridge.ctx.state.bindings.find((b) => b.role === "summarize")?.zdrAttestedAt, "the tick is stored as zdrAttestedAt");
 
     const r = await h.role(appKey, INS, "reasoning");
@@ -276,7 +277,7 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     assert.equal(unset.status, 404);
     assert.equal(json(unset).error.code, "role_not_set");
 
-    assert.equal((await bind({ role: "dreaming", provider: "openai", model: "gpt-dream", keyName: "OpenAI main", dataPolicy: "standard" })).status, 303);
+    assert.equal((await bind({ role: "dreaming", provider: "openai", model: "gpt-dream", keyName: "pk:OpenAI main", dataPolicy: "standard" })).status, 303);
     const low = await h.role(appKey, INS, "dreaming");
     assert.equal(low.status, 403);
     assert.equal(json(low).error.code, "role_policy_too_low");
@@ -288,7 +289,7 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     const noKey = await h.role(appKey, INS, "rerank");
     assert.equal(noKey.status, 404);
     assert.equal(json(noKey).error.code, "role_not_set");
-    assert.equal((await bind({ role: "rerank", provider: "openrouter", model: "rr-1", keyName: "OpenAI main" })).status, 303);
+    assert.equal((await bind({ role: "rerank", provider: "openrouter", model: "rr-1", keyName: "pk:OpenAI main" })).status, 303);
     assert.equal((await h.role(appKey, INS, "rerank")).status, 200);
   });
 
@@ -305,11 +306,11 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     // input hygiene (every case is in the fixture test; one here proves the page uses it)
     await refused({ baseUrl: "http://10.0.0.1\\@evil.example/v1" }, /without a user name, password, spaces, query or fragment/);
     assert.deepEqual(w.bridge.ctx.state.bindings, before, "nothing stored");
-    const zdr = await bind({ role: "reasoning", provider: "deepseek", model: "d", keyName: "OpenAI main", dataPolicy: "zdr", zdr: "1" });
+    const zdr = await bind({ role: "reasoning", provider: "deepseek", model: "d", keyName: "pk:OpenAI main", dataPolicy: "zdr", zdr: "1" });
     assert.equal(zdr.status, 400, "zdr only for providers that offer it");
-    assert.equal((await bind({ role: "reasoning", provider: "openai", model: "d", keyName: "OpenAI main", dataPolicy: "zdr" })).status, 400, "zdr needs the tick");
+    assert.equal((await bind({ role: "reasoning", provider: "openai", model: "d", keyName: "pk:OpenAI main", dataPolicy: "zdr" })).status, 400, "zdr needs the tick");
 
-    assert.equal((await bind({ role: "embeddings", provider: "ollama", model: "nomic", baseUrl: "http://10.20.30.40:11434", keyName: "OpenAI main", dims: "768" })).status, 303);
+    assert.equal((await bind({ role: "embeddings", provider: "ollama", model: "nomic", baseUrl: "http://10.20.30.40:11434", keyName: "pk:OpenAI main", dims: "768" })).status, 303);
     const b = w.bridge.ctx.state.bindings.find((x) => x.role === "embeddings");
     assert.equal(b?.dataPolicy, "local", "a passing private URL defaults to local (C336 Q3)");
     assert.equal(b?.keyName, undefined, "no key for a provider that needs none");
@@ -327,14 +328,14 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
 
   test("RM-6: an instance override wins over the workspace default; the other app keeps the default", async () => {
     assert.equal((await h.post({ action: "pkey", label: "Anthropic main", value: "sk-ant-rm" })).status, 303);
-    assert.equal((await bind({ role: "reasoning", ins: INS, provider: "anthropic", model: "claude-test", keyName: "Anthropic main" })).status, 303);
+    assert.equal((await bind({ role: "reasoning", ins: INS, provider: "anthropic", model: "claude-test", keyName: "pk:Anthropic main" })).status, 303);
     const notes = json(await h.role(appKey, INS, "reasoning"));
     assert.equal(notes.provider, "anthropic");
     assert.equal(notes.key, "sk-ant-rm");
     const guard = json(await h.role(guardKey, HOOKINS, "reasoning"));
     assert.equal(guard.provider, "openai");
     assert.equal(guard.model, "gpt-test");
-    assert.equal((await bind({ role: "reasoning", ins: "ins_01HXXXXXXXXXXXXXXXXXXXXXXX", provider: "openai", model: "x", keyName: "OpenAI main" })).status, 400, "an app that does not declare the role");
+    assert.equal((await bind({ role: "reasoning", ins: "ins_01HXXXXXXXXXXXXXXXXXXXXXXX", provider: "openai", model: "x", keyName: "pk:OpenAI main" })).status, 400, "an app that does not declare the role");
     assert.match(await h.page(), /Remove override/);
     assert.equal((await h.post({ action: "unbind", role: "reasoning", ins: INS })).status, 303);
     assert.equal(json(await h.role(appKey, INS, "reasoning")).provider, "openai", "back to the default");
@@ -347,21 +348,29 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     const html = await ask.text();
     assert.match(html, /Delete OpenAI main\?/);
     assert.match(html, /name="confirm" value="1"/);
-    assert.equal(store().values["OpenAI main"], "sk-rm-two", "nothing deleted yet");
+    assert.equal(store().values["pk:OpenAI main"], "sk-rm-two", "nothing deleted yet");
     assert.equal(store().keysRev, rev);
     assert.equal((await h.post({ action: "pkey_delete", label: "OpenAI main", confirm: "1" })).status, 303);
-    assert.ok(!Object.hasOwn(store().values, "OpenAI main"));
+    assert.ok(!Object.hasOwn(store().values, "pk:OpenAI main"));
     assert.equal(store().keysRev, rev + 1);
-    assert.ok(!w.bridge.ctx.state.bindings.some((b) => b.keyName === "OpenAI main"));
+    assert.ok(!w.bridge.ctx.state.bindings.some((b) => b.keyName === "pk:OpenAI main"));
     assert.equal(w.bridge.ctx.state.bindings.find((b) => b.role === "reasoning" && !b.ins)?.model, "gpt-test", "the binding stays, without a key");
     assert.equal(json(await h.role(appKey, INS, "reasoning")).error.code, "role_not_set");
-    // an app key chosen for a model asks too
+    // RM-25 (spec 0.1.69): a requirement (app) key never satisfies a binding; the form offers provider keys only
     assert.equal((await h.post({ name: "NOTES_API_KEY", value: "sk-notes-rm" })).status, 303);
-    assert.equal((await bind({ role: "reasoning", provider: "openai", model: "gpt-test", keyName: "NOTES_API_KEY" })).status, 303);
-    const ask2 = await h.post({ name: "NOTES_API_KEY", action: "delete" });
-    assert.equal(ask2.status, 200);
-    assert.match(await ask2.text(), /Delete Notes key\?/);
-    assert.equal(store().values.NOTES_API_KEY, "sk-notes-rm");
+    assert.doesNotMatch(await h.page(), /\(app key\)/);
+    const appKeyBind = await bind({ role: "reasoning", provider: "openai", model: "gpt-test", keyName: "NOTES_API_KEY" });
+    assert.equal(appKeyBind.status, 400);
+    assert.match(await appKeyBind.text(), /choose a provider key from the list/);
+    // a binding stored by the earlier 0.2.8 shape that names an app key: not served, status set:false, page "key missing"
+    const st = w.bridge.ctx.state;
+    st.saveBindings(st.bindings.map((b) => (b.role === "reasoning" && !b.ins ? { ...b, keyName: "NOTES_API_KEY" } : b)));
+    assert.equal(json(await h.role(appKey, INS, "reasoning")).error.code, "role_not_set");
+    assert.equal(buildStatusReport(w.bridge.ctx).roles?.find((r) => r.role === "reasoning" && r.ins === INS)?.set, false);
+    assert.match(await h.page(), /Workspace default: OpenAI · gpt-test · https:\/\/api\.openai\.com\/v1 · key missing · standard/);
+    // the owner picks a provider key: served again
+    assert.equal((await bind({ role: "reasoning", provider: "openai", model: "gpt-test", keyName: "pk:Anthropic main" })).status, 303);
+    assert.equal(json(await h.role(appKey, INS, "reasoning")).key, "sk-ant-rm");
   });
 
   test("RM-5 / RM-13 (bridge half): status roles[] are labels only; no base URL, key name or value in reports or logs", async () => {
@@ -459,9 +468,9 @@ describe("Keys and models: owner text is escaped; RM-13 canaries never leave the
     const label = `<img src=x onerror="alert(1)">`;
     assert.equal((await h.post({ action: "pkey", label, value: "sk-xss-rm" })).status, 303);
     // the model label follows MODEL_ID_PATTERN: markup, spaces and "//" are refused
-    for (const model of ["<b>m</b>", "gpt 4", "https://x//y", "", "-m", "m".repeat(129)]) assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai", model, keyName: label })).status, 400, model);
-    assert.equal((await h.post({ action: "bind", role: "utility", provider: "nope", model: "m", keyName: label })).status, 400, "a provider outside the catalog");
-    assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai", model: "org/model:v1@x+y", keyName: label })).status, 303);
+    for (const model of ["<b>m</b>", "gpt 4", "https://x//y", "", "-m", "m".repeat(129)]) assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai", model, keyName: `pk:${label}` })).status, 400, model);
+    assert.equal((await h.post({ action: "bind", role: "utility", provider: "nope", model: "m", keyName: `pk:${label}` })).status, 400, "a provider outside the catalog");
+    assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai", model: "org/model:v1@x+y", keyName: `pk:${label}` })).status, 303);
     const html = await h.page();
     assert.ok(!html.includes(label));
     assert.ok(html.includes("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;"));
@@ -473,7 +482,7 @@ describe("Keys and models: owner text is escaped; RM-13 canaries never leave the
 
   test("RM-13 (bridge half): canary base URL, key name and value: zero hits in status bodies and logs", async () => {
     assert.equal((await h.post({ action: "pkey", label: CANARY.keyName, value: CANARY.value })).status, 303);
-    assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai-compatible", model: "canary-model", baseUrl: CANARY.baseUrl, keyName: CANARY.keyName })).status, 303);
+    assert.equal((await h.post({ action: "bind", role: "utility", provider: "openai-compatible", model: "canary-model", baseUrl: CANARY.baseUrl, keyName: `pk:${CANARY.keyName}` })).status, 303);
     assert.equal(w.bridge.ctx.state.bindings.find((b) => b.role === "utility")?.dataPolicy, "local");
     await waitFor(() => (w.acks as StatusReport[]).some((a) => a.roles?.some((r) => r.model === "canary-model" && r.set)), 15000);
     const seen = JSON.stringify(w.acks) + JSON.stringify(buildStatusReport(w.bridge.ctx)) + JSON.stringify(lines);
@@ -538,7 +547,7 @@ describe("spec follow-up #49 on the page: Own hosts, gateway attestation, owner-
   });
 
   test("gateway zdr: the confirmation names the host; until then and after a MODEL change it counts as standard", async () => {
-    const bind = (model: string, extra: Record<string, string> = {}) => h.post({ action: "bind", role: "utility", provider: "openrouter", model, keyName: "gw", dataPolicy: "zdr", zdr: "1", ...extra });
+    const bind = (model: string, extra: Record<string, string> = {}) => h.post({ action: "bind", role: "utility", provider: "openrouter", model, keyName: "pk:gw", dataPolicy: "zdr", zdr: "1", ...extra });
     const ask = await bind("vendor/model-a");
     assert.equal(ask.status, 200, "the generic tick is not enough for a gateway");
     const html = await ask.text();
@@ -560,7 +569,7 @@ describe("spec follow-up #49 on the page: Own hosts, gateway attestation, owner-
     assert.equal((await bind("vendor/model-b", { zdr_host: "openrouter.ai" })).status, 303);
     assert.deepEqual([policy(), row()?.policyBasis], ["zdr", "owner_attested"]);
     // openai behind a proxy is an effective gateway: the confirmation names the proxy host
-    const proxy = await h.post({ action: "bind", role: "utility", provider: "openai", model: "gpt-x", baseUrl: "https://proxy.example/v1", keyName: "gw", dataPolicy: "zdr", zdr: "1" });
+    const proxy = await h.post({ action: "bind", role: "utility", provider: "openai", model: "gpt-x", baseUrl: "https://proxy.example/v1", keyName: "pk:gw", dataPolicy: "zdr", zdr: "1" });
     assert.equal(proxy.status, 200);
     assert.match(await proxy.text(), /my contract with proxy\.example keeps no data/);
   });

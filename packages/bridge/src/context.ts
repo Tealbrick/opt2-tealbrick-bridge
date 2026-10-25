@@ -24,7 +24,7 @@ export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../packa
 export const DRAIN_RETRY_AFTER_S = 2;
 /** spec 0.1.63 (bridge.ts `rejected` doc, BRIDGE §15.6): kind `config` + this code = a persona over PERSONA_MAX_CHARS, dropped */
 export const PERSONA_TOO_LONG = "persona_too_long";
-/** spec 0.1.68 (QA-SPEC49-14, C353): kind `config` + this code = a persona that does not match PERSONA_PATTERN, dropped */
+/** spec 0.1.68 (QA-SPEC49-14): kind `config` + this code = a persona that does not match PERSONA_PATTERN (spec 0.1.69, C356), dropped */
 export const PERSONA_INVALID = "persona_invalid";
 /** unicode mode: a surrogate PAIR (an emoji) is one code point and never matches the lone-surrogate range */
 const PERSONA_RE = new RegExp(PERSONA_PATTERN, "u");

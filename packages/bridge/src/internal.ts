@@ -35,6 +35,16 @@ export const EVENT_INGEST_MAX_BYTES = 512 * 1024;
 /** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. Event ingest uses the same bucket (§14.1). */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
 
+/** A decoded path segment; a malformed percent escape (`%`, `%FF`, `%E0%A4%A`) is `400 bad_request` right after the caller is
+ *  authenticated, never 500 (QA-BRIDGE22-2; BRIDGE §9.4 / §15.4 of specs#55, RM-25). */
+function pathSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new BridgeError("bad_request", 400, "malformed percent-encoding in the path");
+  }
+}
+
 /** BRIDGE_INTERNAL_PATHS.modelRoles without `{role}` (spec 0.1.63, BRIDGE §15.4) */
 const MODEL_ROLES_PREFIX = BRIDGE_INTERNAL_PATHS.modelRoles.slice(0, -"{role}".length);
 
@@ -125,8 +135,8 @@ export class InternalApi {
       }
       if (req.method === "POST" && url.pathname === "/tb/v1/claim") return await this.claim(req, res);
       if (req.method === "POST" && url.pathname === "/tb/v1/status") return await this.status(req, res, url);
-      if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, decodeURIComponent(url.pathname.slice(12)));
-      if (req.method === "GET" && url.pathname.startsWith(MODEL_ROLES_PREFIX)) return this.modelRoleFetch(req, res, decodeURIComponent(url.pathname.slice(MODEL_ROLES_PREFIX.length)));
+      if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, url.pathname.slice(12));
+      if (req.method === "GET" && url.pathname.startsWith(MODEL_ROLES_PREFIX)) return this.modelRoleFetch(req, res, url.pathname.slice(MODEL_ROLES_PREFIX.length));
       if (req.method === "POST" && url.pathname === "/tb/v1/call") {
         // F57a: no new companion call while draining (retryable; nothing ran)
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
@@ -300,8 +310,10 @@ export class InternalApi {
   }
 
   // ── §9.4 key fetch ──
-  private async keyFetch(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+  private async keyFetch(req: IncomingMessage, res: ServerResponse, rawName: string): Promise<void> {
     const caller = this.assertCaller(req, Buffer.alloc(0));
+    // specs#55 order: authenticate first (401), then a malformed percent-encoding (400 bad_request), then the rest
+    const name = pathSegment(rawName);
     const t = this.ctx.table;
     if (!t) throw new BridgeError("app_unavailable", 503);
     if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
@@ -321,8 +333,10 @@ export class InternalApi {
   }
 
   // ── §15.4 model-role resolve (v0.1.63): the binding is never logged ──
-  private modelRoleFetch(req: IncomingMessage, res: ServerResponse, role: string): void {
+  private modelRoleFetch(req: IncomingMessage, res: ServerResponse, rawRole: string): void {
     const caller = this.assertCaller(req, Buffer.alloc(0));
+    // specs#55 order: authenticate first (401), then a malformed percent-encoding (400 bad_request), then the rest
+    const role = pathSegment(rawRole);
     const t = this.ctx.table;
     if (!t) throw new BridgeError("app_unavailable", 503);
     if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
