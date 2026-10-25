@@ -15,7 +15,7 @@ import type { BridgeContext } from "./context.ts";
 import { applyModelsPost, confirmPage, deleteQuestion, hintsFrom, type RoleHint, renderModels, renderOwnHosts, renderProviderKeys, servesText } from "./models-page.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
 import type { AppRuntime } from "./table.ts";
-import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson } from "./util.ts";
+import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson, urlOf } from "./util.ts";
 
 const MAX_UI_BODY = 10 * 1024 * 1024;
 const MAX_PUBLIC_BODY = 1024 * 1024;
@@ -175,10 +175,11 @@ export class PersonSurfaces {
    * tunnels are closed.
    */
   upgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {
-    const url = new URL(req.url ?? "/", "http://x");
-    const m = /^\/a\/([a-z][a-z0-9-]{1,31})(\/.*)?$/.exec(url.pathname);
+    // an unparseable target (e.g. `GET //`) is a 404 like any other path: a throw in this listener would stop the process
+    const url = urlOf(req.url);
+    const m = url ? /^\/a\/([a-z][a-z0-9-]{1,31})(\/.*)?$/.exec(url.pathname) : null;
     const app = m ? this.ctx.table?.appsByProduct.get(m[1] as string) : undefined;
-    if (!app || !this.allowedUiPath(app, m?.[2] ?? "/")) {
+    if (!url || !app || !this.allowedUiPath(app, m?.[2] ?? "/")) {
       socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n");
       return;
     }
