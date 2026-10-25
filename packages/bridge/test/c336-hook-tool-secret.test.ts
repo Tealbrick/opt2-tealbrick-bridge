@@ -14,6 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
+import { DYNAMIC_CALL_INPUT_SCHEMA, validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { CallRouter } from "../src/calls.ts";
 import { jsonLogger } from "../src/util.ts";
@@ -161,50 +162,48 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
     resolveAs = (t) => t;
   });
 
-  test("BRIDGE23-1 (spec 0.1.68 {1,62}, C354): a resolved variant of 49 and of 63 chars (a 48-char catalog name + `__first_contact`) passes and is the hook target.tool; 64 chars is refused", async () => {
-    const base48 = `g${"m".repeat(47)}`;
-    const base46 = base48.slice(0, 46);
-    for (const [requested, resolved] of [
-      [base46, `${base46}__x`],
-      [base48, `${base48}__first_contact`],
-    ] as const) {
-      assert.ok(resolved.length >= 49 && resolved.length <= 63, String(resolved.length));
-      resolveAs = () => resolved;
-      const from = w.appLog.hooks.length;
-      const r = await mcpCall("notes__notes_tools_call", { tool: requested, arguments: {} });
-      assert.notEqual(r.isError, true, `${resolved.length} chars: ${JSON.stringify(r)}`);
-      const seen = hooksSince(from);
-      assert.deepEqual(
-        seen.map((x) => x.phase),
-        ["before", "context", "after"],
-      );
-      for (const x of seen) assert.equal(x.target.tool, resolved, `${resolved.length} chars, ${x.phase}`);
-    }
-    // a fresh requested name (resolutions are cached per requested name)
-    const other48 = `h${"m".repeat(47)}`;
-    const name64 = `${other48}__first_contact_`;
-    assert.equal(name64.length, 64);
-    resolveAs = () => name64;
-    const from = w.appLog.hooks.length;
-    const r = await mcpCall("notes__notes_tools_call", { tool: other48, arguments: {} });
-    assert.equal(r.structuredContent?.error?.code, "dynamic_resolve_failed", "64 chars is refused");
-    assert.equal(w.appLog.hooks.length, from, "no hook ran");
-    resolveAs = (t) => t;
-  });
+  // The pinned manifest (0.1.30) still refuses a requested dynamic tool over 48 chars at input validation; sdk#51 widens
+  // DYNAMIC_CALL_INPUT_SCHEMA to {1,62}. The full-path test runs once the bridge pins that manifest; the resolve rule itself is
+  // tested below on the real resolver now.
+  const pinnedAccepts63 = validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: `g${"m".repeat(47)}__first_contact`, arguments: {} }).ok;
+  test(
+    "BRIDGE23-1 full path (spec 0.1.68 {1,62}, C354): the agent requests a 49- and a 63-char name (a 48-char tool + `__first_contact`), the app resolves the same name → passes, it is the hook target.tool",
+    { skip: pinnedAccepts63 ? false : "needs the manifest re-pin (sdk#51: DYNAMIC_CALL_INPUT_SCHEMA tool up to 63 chars)" },
+    async () => {
+      resolveAs = (t) => t;
+      const base48 = `g${"m".repeat(47)}`;
+      for (const name of [`${base48}x`, `${base48}__first_contact`]) {
+        const from = w.appLog.hooks.length;
+        const r = await mcpCall("notes__notes_tools_call", { tool: name, arguments: {} });
+        assert.notEqual(r.isError, true, `${name.length} chars: ${JSON.stringify(r)}`);
+        const seen = hooksSince(from);
+        assert.deepEqual(
+          seen.map((x) => x.phase),
+          ["before", "context", "after"],
+        );
+        for (const x of seen) assert.equal(x.target.tool, name, `${name.length} chars, ${x.phase}`);
+      }
+    },
+  );
 
-  test("C354: the variant rule is exact — a suffix needs `__`, a variant of a variant or of another tool is refused", async () => {
-    for (const [requested, resolved] of [
-      // fresh requested names (resolutions are cached per requested name)
-      ["vr_a", "vr_ax"],
-      ["vr_b", "vr_b__"],
-      ["vr_c", "vr_c_first_contact"],
-      ["vr_d", "vr_dd__first_contact"],
-      ["vr_e__first_contact", "vr_e__first_contact__again"],
-    ] as const) {
-      resolveAs = () => resolved;
-      const r = await mcpCall("notes__notes_tools_call", { tool: requested, arguments: {} });
-      assert.equal(r.structuredContent?.error?.code, "dynamic_resolve_failed", `${requested} → ${resolved}`);
+  test("BRIDGE23-1 resolver (spec 0.1.68 {1,62}, C354): a 49- and a 63-char resolution equal to the request passes; one that differs (also `<requested>__<suffix>`) or has 64 chars is refused dynamic_resolve_failed", async () => {
+    const router = new CallRouter(w.bridge.ctx) as unknown as { resolve(app: unknown, op: string, tool: string): Promise<{ tool: string }> };
+    const base48 = `k${"m".repeat(47)}`;
+    for (const name of [`${base48}x`, `${base48}__first_contact`]) {
+      resolveAs = (t) => t;
+      assert.ok(name.length >= 49 && name.length <= 63);
+      assert.equal((await router.resolve(app(), "notes_tools", name)).tool, name, `${name.length} chars`);
     }
+    const refused = async (requested: string, answer: string) => {
+      resolveAs = () => answer;
+      await assert.rejects(router.resolve(app(), "notes_tools", requested), (e: unknown) => (e as { code?: string }).code === "dynamic_resolve_failed", `${requested} → ${answer}`);
+    };
+    const other48 = `q${"m".repeat(47)}`;
+    await refused(`${other48}__first_contact_`, `${other48}__first_contact_`); // 64 chars, equal
+    await refused(`r${"m".repeat(47)}`, `r${"m".repeat(47)}__first_contact`); // the app swaps in a variant the agent did not request
+    await refused("vr_a", "vr_a__first_contact");
+    await refused("vr_b", "vr_bx");
+    await refused("vr_c__first_contact", "vr_c");
     resolveAs = (t) => t;
   });
 
