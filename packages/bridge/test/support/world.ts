@@ -188,6 +188,8 @@ export interface WorldOptions {
    * the per-form defaults).
    */
   formDefaultHosts?: boolean;
+  /** spec 0.1.73 BRIDGE §7.5: run the lazy-tools path although the pinned validator predates it (start option, test only) */
+  lazyTools?: boolean;
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -429,7 +431,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const loopback = opts.formDefaultHosts ? {} : { TB_PUBLIC_HOST: "127.0.0.1", TB_INTERNAL_HOST: "127.0.0.1" };
   const bridgeEnv = (): NodeJS.ProcessEnv => ({ ...loopback, TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url, ...(opts.extraOwnInfraOrigins ?? [])].join(","), ...opts.env, ...envOverrides });
   const roots = opts.portalRoots ?? (root ? [root.publicJwk] : undefined);
-  const rootOpt = roots ? { portalRootKeys: roots } : {};
+  const rootOpt = { ...(roots ? { portalRootKeys: roots } : {}), ...(opts.lazyTools !== undefined ? { lazyTools: opts.lazyTools } : {}) };
   let bridge: RunningBridge;
   try {
     bridge = await startBridge({

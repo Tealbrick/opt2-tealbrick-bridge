@@ -14,6 +14,7 @@ import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { acceptedDigests, buildTable, internalUrlAllowed, type Table } from "./table.ts";
+import { hasLazyOp } from "./tools.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
@@ -196,6 +197,8 @@ export async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Prom
   const v = ctx.api.validateManifest(await res.json());
   // the validator's own code (e.g. dynamic_invalid), so Core can say why (L3)
   if (!v.ok) throw new ManifestError(v.errors[0]?.code ?? "manifest_invalid");
+  // spec 0.1.73 (C354, MANIFEST M-OP-13): a manifest with a lazy op needs a bridge with `lazy_tools`; without it, refuse here
+  if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new ManifestError("bridge_cap_missing");
   // C104: an app that needs a newer bridge is refused here, never routed half-working
   const need = ctx.api.requiredBridgeVersion(v.manifest).bridge;
   if (need && ctx.api.compareSemver(need, BRIDGE_VERSION) > 0) throw new ManifestError("bridge_too_old");

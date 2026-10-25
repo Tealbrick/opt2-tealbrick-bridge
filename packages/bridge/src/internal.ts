@@ -3,6 +3,7 @@
  * long-poll, key fetch, app→app companion call, metrics. Callers prove themselves with instance
  * assertions (`TB-Assert`, typ tb-instance-assert+jwt, bound to method, path and body).
  */
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { EVENT_BATCH_MAX } from "@opt2-tealbrick/manifest";
 import { isRefusal, SDK_CURRENT_MAJOR } from "@opt2-tealbrick/relay";
@@ -18,6 +19,7 @@ import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
+import { hasLazyOp } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
@@ -185,6 +187,8 @@ export class InternalApi {
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
+      // spec 0.1.73 (C354, MANIFEST M-OP-13): no lazy registration without `lazy_tools`
+      if (!ctx.lazyTools && hasLazyOp(v.manifest)) throw new BridgeError("bridge_cap_missing", 409, "this bridge does not declare lazy_tools", { cap: "lazy_tools" });
       manifest = v.manifest;
     } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {
       // G2b: the claim may carry the serving digest or, mid-attempt, the candidate digest; anything else is refused

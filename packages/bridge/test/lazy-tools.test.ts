@@ -10,6 +10,8 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { manifestApi } from "@opt2-tealbrick/relay";
+import { LAZY_TOOLS_PINNED } from "../src/context.ts";
+import { buildStatusReport } from "../src/portal.ts";
 import { MORE_CALL_OP, MORE_SEARCH_OP, searchLazy, type ToolDef } from "../src/tools.ts";
 import { AGT, BRG, INS, makeWorld, notesManifest, type World, WS, waitFor } from "./support/world.ts";
 
@@ -65,7 +67,7 @@ for (const real of [false, true]) {
   describe(`listing: "lazy" (${real ? "real manifest crypto" : "test double"})`, { skip }, () => {
     let w: World;
     before(async () => {
-      w = await makeWorld({ real, withHook: true });
+      w = await makeWorld({ real, withHook: true, ...(real ? {} : { lazyTools: true }) });
       w.updateAppTo(manifest);
       await w.publish();
       await waitFor(() => !!w.bridge.ctx.table?.apps.get(INS as never)?.ops.has("notes_archive"), 15000);
@@ -229,7 +231,7 @@ describe("lazy tools: QA fixes (test double)", () => {
   let w: World;
   let admitted: string[] = [];
   before(async () => {
-    w = await makeWorld({ real: false });
+    w = await makeWorld({ real: false, lazyTools: true });
     w.bridgeOps.answer = (path) => {
       if (path === "catalog") return [entry("tb_more_call"), entry("tb_skills"), entry("ok_entry")];
       if (path === "scope-summary") return [{ agent: AGT, label: "1 Notebook", admittedOps: admitted }];
@@ -286,6 +288,29 @@ describe("lazy tools: QA fixes (test double)", () => {
     w.bridge.ctx.scopeSummaryAt.set(INS as never, 0);
     assert.equal((await call(w, s, CALL, { tool: "nope", arguments: {} })).structuredContent?.error?.code, "unknown_tool");
     assert.equal(w.bridgeOps.seen.filter((x) => x.path === "scope-summary").length, seen + 1);
+  });
+});
+
+describe("C354: a bridge without lazy_tools refuses lazy registration (test double, default build)", () => {
+  let w: World;
+  before(async () => {
+    w = await makeWorld({ real: false });
+    w.updateAppTo(manifest);
+    await w.publish();
+    await waitFor(() => buildStatusReport(w.bridge.ctx).rejected.some((x) => x.kind === "manifest" && x.code === "bridge_cap_missing"), 15000);
+  });
+  after(async () => {
+    await w.close();
+  });
+  test("the pinned validator predates lazy: the manifest is refused bridge_cap_missing, no lazy route, no pair, nothing registered half-working", async () => {
+    assert.equal(w.bridge.ctx.lazyTools, LAZY_TOOLS_PINNED);
+    assert.equal(LAZY_TOOLS_PINNED, false, "this build pins spec 0.1.57 (the pin bump flips it and declares lazy_tools)");
+    const r = buildStatusReport(w.bridge.ctx).rejected.find((x) => x.kind === "manifest" && x.code === "bridge_cap_missing");
+    assert.equal(r?.ins, INS);
+    assert.ok(!w.bridge.ctx.table?.apps.get(INS as never)?.ops.has("notes_archive"), "the lazy manifest is not served");
+    const s = await session(w);
+    const names = (await list(w, s)).map((t) => t.name);
+    assert.ok(!names.includes(SEARCH) && !names.includes(CALL) && !names.includes("notes__notes_archive"));
   });
 });
 

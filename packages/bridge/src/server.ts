@@ -42,6 +42,8 @@ export interface BridgeServerOptions {
    * the production entry (bridge-server) never passes it.
    */
   portalRootKeys?: Ed25519PublicJwk[];
+  /** spec 0.1.73 BRIDGE §7.5 test harness only: run the lazy-tools path although the pinned validator predates it. Never env. */
+  lazyTools?: boolean;
 }
 
 /** Listener limits against slow-body and connection exhaustion (BSD-01). */
@@ -238,6 +240,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     form,
     ownInfraOrigins: (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
     ...(o.portalRootKeys ? { portalRoots: o.portalRootKeys } : {}),
+    ...(o.lazyTools !== undefined ? { lazyTools: o.lazyTools } : {}),
     ...(o.fetch ? { fetch: o.fetch } : {}),
   });
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);

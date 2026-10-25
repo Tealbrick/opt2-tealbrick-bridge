@@ -58,6 +58,8 @@ export const MORE_CALL_OP: string = RULE_066.moreCallOp ?? "tb_more_call";
 /** a STATIC op marked lazy (a dynamic op with `listing: "lazy"` is refused by validators from spec 0.1.73, M-OP-13; tolerated here: listed) */
 export const isLazyOp = (op: OperationView): boolean => !op.standard && !op.dynamic && (op.listing as string | undefined) === "lazy";
 const MORE_HINT_IDS = 5;
+/** MANIFEST M-OP-13: does the manifest use `listing: "lazy"` on any op? (a bridge without `lazy_tools` refuses it) */
+export const hasLazyOp = (m: { operations: readonly { listing?: unknown }[] }): boolean => m.operations.some((o) => o.listing === "lazy");
 const SEARCH_SCHEMA: JsonSchemaObject = {
   type: "object",
   additionalProperties: false,
