@@ -390,11 +390,13 @@ export class InternalApi {
         input: (env.input ?? {}) as Json,
         ...(env.idempotencyKey ? { idempotencyKey: env.idempotencyKey } : {}),
         ...(parentCall ? { parentCall } : {}),
+        // v0.1.77 (C367 P4, BRIDGE §8.5): as sent; `route` validates it against the presented grant's verified product
+        ...(env.context !== undefined ? { callerContext: env.context } : {}),
       });
       sendJson(res, result.status === "held" ? 202 : 200, result);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
-      sendJson(res, e instanceof BridgeError && e.status !== 400 ? e.status : statusFor(code), envelope(code, e instanceof Error ? e.message : code, requestId));
+      sendJson(res, e instanceof BridgeError && e.status !== 400 ? e.status : statusFor(code), envelope(code, e instanceof Error ? e.message : code, requestId, e instanceof BridgeError ? e.details : undefined));
     }
   }
 

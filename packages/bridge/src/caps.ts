@@ -25,24 +25,30 @@
  *    the relay's dynamic call; all through calls.ts `route`) the hook `call.target.tool` is the resolution's canonical tool
  *    with its crud/effect/holdFamily, absent for static ops; a resolution whose tool differs from the requested name or is not
  *    `^[a-z][a-z0-9_]{1,62}$` is refused `dynamic_resolve_failed` (calls.ts `resolve`, `effectiveOp`).
+ *  - `app_hold_status` (spec 0.1.77, bridge 0.2.11, BRIDGE §8.3, C367 P3) = on the companion path the standard op `tb.hold_status` is
+ *    routed when the presented grant's `wf` lists it (calls.ts `runGate`; the I4 CRUD skip of gate() applies), and only to a
+ *    target whose last reported `sdkVersion` is at least `APP_HOLD_STATUS_MIN_SDK` (app-calls.ts); otherwise `not_in_workflow`
+ *    and the target is not called. Agent calls are unchanged.
+ *  - `app_call_context` (spec 0.1.77, bridge 0.2.11, BRIDGE §8.5, C367 P4) = a companion `CallEnvelope.context` is validated against
+ *    the presented grant's verified `prd` (400 `input_invalid` + `details.pointer`), merged into the op body `context` before the
+ *    before hooks and bound by the op proof's `ctx` digest (calls.ts `route`, app-calls.ts `callerContextKeys`).
  *  - `secret_output` (spec 0.1.68, MANIFEST M-OP-12) is NOT declared yet (C354, BRIDGE23-3): the secretOutput code paths are in
  *    (tools.ts `visibleOps`, calls.ts `route` / `forward`), but this build pins a manifest validator (0.1.30) that refuses a
  *    manifest with `secretOutput`, so no such app can run here. Declare it in the change that re-pins manifest >= 0.1.31.
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 
-/** spec 0.1.68: `hook_tool` joins `BRIDGE_CAPS`; local until the spec pin carries it (`secret_output` waits for the manifest re-pin). */
-export type DeclaredCap = BridgeCap | "hook_tool";
+/** spec 0.1.77: `BRIDGE_CAPS` carries every cap this build names (`hook_tool` and `secret_output` since 0.1.68), so a misspelt entry fails to compile. */
+export type DeclaredCap = BridgeCap;
 
-export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool"];
+export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
  * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
  */
 export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
-  // spec 0.1.68: the wire type is the pinned BridgeCap until the re-pin; the wire schema takes any cap matching its pattern
-  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true) as BridgeCap[];
+  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
 }
 
 /**
