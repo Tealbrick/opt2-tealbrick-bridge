@@ -40,8 +40,8 @@ importers:
         specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz
         version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz
-        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz
+        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz
+        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz
 
   packages/bridge-server:
     dependencies:
@@ -49,8 +49,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz
-        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz
+        specifier: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz
+        version: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz
 
 packages:
 
@@ -138,6 +138,10 @@ packages:
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz':
     resolution: {integrity: sha512-oMtwFmCBZ76rN1OqWvWrZBFImHDkiHINWP1/dXIb/1jlUqfLK7LI0SkFCH8oJnkfzk6D148NzJX3qOAkmnQgnA==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz}
     version: 0.1.65
+
+  '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz':
+    resolution: {integrity: sha512-KmKTS3qGwH/QgGyREkSjicwrCdGplaVRENcWv4QryUAvKuwbJlVoN1+eMKc4rCurphia8APPHCVzCw5efDngpw==, tarball: https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz}
+    version: 0.1.71
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -244,6 +248,8 @@ snapshots:
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.57/opt2-tealbrick-spec-0.1.57.tgz': {}
 
   '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.65/opt2-tealbrick-spec-0.1.65.tgz': {}
+
+  '@opt2-tealbrick/spec@https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.71/opt2-tealbrick-spec-0.1.71.tgz': {}
 
   '@types/node@24.19.2':
     dependencies:

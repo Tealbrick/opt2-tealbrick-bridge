@@ -1,6 +1,6 @@
 /**
  * Internal listener (private network only, BRIDGE §3.2): app claim, status push + slice/keys
- * long-poll, key fetch, app→app companion call, metrics. Callers prove themselves with instance
+ * long-poll, key fetch, model-role resolve (v0.1.63), app→app companion call, metrics. Callers prove themselves with instance
  * assertions (`TB-Assert`, typ tb-instance-assert+jwt, bound to method, path and body).
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -9,15 +9,18 @@ import { isRefusal, SDK_CURRENT_MAJOR } from "@opt2-tealbrick/relay";
 import { type AppStatus, type AppStatusResponse, BRIDGE_INTERNAL_PATHS, type CallEnvelope, type ClaimRequest, type ClaimResponse, type KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { ErrorCode } from "@opt2-tealbrick/spec/routes";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
+import { missingBridgeCap } from "./caps.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
+import { resolveForCaller } from "./model-roles.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { type AppRuntime, acceptedDigests, internalUrlAllowed, type Table } from "./table.ts";
+import { type AppRuntime, acceptedDigests, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
@@ -33,6 +36,22 @@ export const EVENT_INGEST_MAX_BYTES = 512 * 1024;
 
 /** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. Event ingest uses the same bucket (§14.1). */
 export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
+
+/** spec 0.1.71 error code of BRIDGE §9.4 / §15.4 (declared in the spec's `ErrorCode`, not in `BridgeErrorCode`) */
+const BAD_REQUEST = "bad_request" satisfies ErrorCode;
+
+/** A decoded path segment; a malformed percent escape (`%`, `%FF`, `%E0%A4%A`) is `400 bad_request` right after the caller is
+ *  authenticated, never 500 (QA-BRIDGE22-2; BRIDGE §9.4 / §15.4 of specs#55, RM-25). */
+function pathSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new BridgeError(BAD_REQUEST, 400, "malformed percent-encoding in the path");
+  }
+}
+
+/** BRIDGE_INTERNAL_PATHS.modelRoles without `{role}` (spec 0.1.63, BRIDGE §15.4) */
+const MODEL_ROLES_PREFIX = BRIDGE_INTERNAL_PATHS.modelRoles.slice(0, -"{role}".length);
 
 const pauseSignature = (t: Table): string => `${t.pausedWorkspace}|${[...t.pausedAgents].sort().join(",")}|${[...t.pausedInstances].sort().join(",")}`;
 
@@ -121,7 +140,8 @@ export class InternalApi {
       }
       if (req.method === "POST" && url.pathname === "/tb/v1/claim") return await this.claim(req, res);
       if (req.method === "POST" && url.pathname === "/tb/v1/status") return await this.status(req, res, url);
-      if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, decodeURIComponent(url.pathname.slice(12)));
+      if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, url.pathname.slice(12));
+      if (req.method === "GET" && url.pathname.startsWith(MODEL_ROLES_PREFIX)) return this.modelRoleFetch(req, res, url.pathname.slice(MODEL_ROLES_PREFIX.length));
       if (req.method === "POST" && url.pathname === "/tb/v1/call") {
         // F57a: no new companion call while draining (retryable; nothing ran)
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
@@ -185,6 +205,9 @@ export class InternalApi {
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());
       if (!v.ok || v.digest !== r.manifestDigest) throw new BridgeError("manifest_mismatch", 409);
+      // spec 0.1.68 (C354): the same capability check as an app's manifest fetch (portal.ts fetchManifestFrom)
+      const missing = missingBridgeCap(v.manifest, ctx.api);
+      if (missing) throw new BridgeError("bridge_cap_missing", 409, `this bridge does not declare the capability ${missing}`, { cap: missing });
       manifest = v.manifest;
     } else if (!app || !acceptedDigests(app.entry).includes(r.manifestDigest)) {
       // G2b: the claim may carry the serving digest or, mid-attempt, the candidate digest; anything else is refused
@@ -295,8 +318,10 @@ export class InternalApi {
   }
 
   // ── §9.4 key fetch ──
-  private async keyFetch(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+  private async keyFetch(req: IncomingMessage, res: ServerResponse, rawName: string): Promise<void> {
     const caller = this.assertCaller(req, Buffer.alloc(0));
+    // specs#55 order: authenticate first (401), then a malformed percent-encoding (400 bad_request), then the rest
+    const name = pathSegment(rawName);
     const t = this.ctx.table;
     if (!t) throw new BridgeError("app_unavailable", 503);
     if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
@@ -305,7 +330,7 @@ export class InternalApi {
     const app = t.apps.get(caller.ins);
     if (!app) throw new BridgeError("app_unavailable", 503, "no verified config entry for this instance yet; retry");
     const user = caller.svc ?? "app";
-    const declared = t.config.keyRequirements.some((r) => r.ins === caller.ins && r.name === name && r.source === "account_default" && r.usedBy.includes(user));
+    const declared = keyRequirements(t).some((r) => r.ins === caller.ins && r.name === name && r.source === "account_default" && r.usedBy.includes(user));
     // mid-deploy (app down or its manifest not loaded): a key the next revision adds may not be listed yet → transient
     if (!declared && (app.down || !app.manifest)) throw new BridgeError("app_unavailable", 503, "the app is updating; retry");
     if (!declared) throw new BridgeError("key_not_declared", 403);
@@ -313,6 +338,18 @@ export class InternalApi {
     if (value === undefined) throw new BridgeError("key_not_set", 404);
     const out: KeyFetchResponse = { name, value, keysRev: this.ctx.state.keyStore.keysRev };
     sendJson(res, 200, out);
+  }
+
+  // ── §15.4 model-role resolve (v0.1.63): the binding is never logged ──
+  private modelRoleFetch(req: IncomingMessage, res: ServerResponse, rawRole: string): void {
+    const caller = this.assertCaller(req, Buffer.alloc(0));
+    // specs#55 order: authenticate first (401), then a malformed percent-encoding (400 bad_request), then the rest
+    const role = pathSegment(rawRole);
+    const t = this.ctx.table;
+    if (!t) throw new BridgeError("app_unavailable", 503);
+    if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
+    if (!t.apps.has(caller.ins)) throw new BridgeError("app_unavailable", 503, "no verified config entry for this instance yet; retry");
+    sendJson(res, 200, resolveForCaller(this.ctx, t, caller.ins, caller.svc ?? "app", role));
   }
 
   // ── §8.3 companion (app→app) ──
@@ -439,7 +476,7 @@ export class InternalApi {
  * sees settings (S6) and never re-derives this from the app's live manifest (C69).
  */
 export function serviceKeyNames(t: Table, ins: InstanceId, user: string): string[] {
-  return t.config.keyRequirements.filter((r) => r.ins === ins && r.usedBy.includes(user)).map((r) => r.name);
+  return keyRequirements(t).filter((r) => r.ins === ins && r.usedBy.includes(user)).map((r) => r.name);
 }
 
 /** Slice `rev` (from the slice payload) is the revision apps compare. */

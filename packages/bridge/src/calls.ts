@@ -19,6 +19,7 @@ import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFE
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
+import { isSecretOutputOp } from "./tools.ts";
 import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
 
 export type Caller =
@@ -46,6 +47,8 @@ export interface CallRequest {
 export type CallOutcome = OpResult<JsonValue>;
 
 export const RESOLVE_TTL_MS = 5 * 60_000;
+/** spec 0.1.68 (BRIDGE v0.1.68, cap `hook_tool`): a dynamic resolution's canonical tool name. */
+export const DYNAMIC_TOOL_RE = /^[a-z][a-z0-9_]{1,62}$/; // spec 0.1.68: catalog names (<= 48) and variants the agent requests, such as `<tool>__first_contact`
 const APP_TIMEOUT_MS = 30_000;
 /** F57a: message of a call cut off at the drain bound (it may have run: the caller checks before retrying) */
 const CUT_OFF = "the bridge restarted while this call ran; its outcome is unknown, check before retrying";
@@ -322,22 +325,32 @@ export class CallRouter {
     if ((value.effect === "outward" || value.effect === "money") && !(typeof value.holdFamily === "string" && value.holdFamily)) {
       throw new BridgeError("dynamic_resolve_failed", 403, "the app resolved an outward or money tool without a hold family", { reason: "family_missing" });
     }
+    // spec 0.1.68 (BRIDGE v0.1.68, cap `hook_tool`; C354): the resolution names the app's canonical tool, which hooks see as
+    // `target.tool`. It must EQUAL the requested name (an app never swaps the tool behind the agent's request; a variant such
+    // as `<tool>__first_contact` is requested by the agent itself) and match DYNAMIC_TOOL_RE (≤ 63 chars). A case, space,
+    // alias or `__` variant is refused, never mapped, so a hold on a tool cannot be bypassed. Refused, not cached.
+    if (typeof value.tool !== "string" || value.tool !== tool || !DYNAMIC_TOOL_RE.test(value.tool)) {
+      throw new BridgeError("dynamic_resolve_failed", 403, "the app's resolution names a different or malformed tool", { reason: "tool_mismatch" });
+    }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
     this.resolveCache.set(key, { at: Date.now(), value });
     return value;
   }
 
-  /** Effective op for gate() and hooks: dynamic ops take crud/effect/holdFamily from resolve, within ceilings. */
-  private async effectiveOp(t: Target): Promise<OperationView> {
+  /**
+   * Effective op for gate() and hooks: dynamic ops take crud/effect/holdFamily from resolve, within ceilings, and `tool` =
+   * the resolution's canonical tool (spec 0.1.68, hook target `tool`); static ops have no tool.
+   */
+  private async effectiveOp(t: Target): Promise<{ op: OperationView; tool?: string }> {
     const op = t.op;
-    if (op.standard || !op.dynamic) return op;
+    if (op.standard || !op.dynamic) return { op };
     if (!t.tool) throw new BridgeError("input_invalid", 400, "dynamic tool missing");
     const r = await this.resolve(t.app, op.id, t.tool);
     const ceilingIdx = EFFECTS.indexOf(op.dynamic.effectCeiling);
     if (!r.crud.every((c) => op.dynamic?.crudCeiling.includes(c)) || EFFECTS.indexOf(r.effect) > ceilingIdx) {
       throw new BridgeError("dynamic_ceiling_exceeded", 403);
     }
-    return { ...op, crud: r.crud as CrudAction[], effect: r.effect as Effect, ...(r.holdFamily ? { holdFamily: r.holdFamily as HoldFamily } : {}) };
+    return { op: { ...op, crud: r.crud as CrudAction[], effect: r.effect as Effect, ...(r.holdFamily ? { holdFamily: r.holdFamily as HoldFamily } : {}) }, tool: r.tool };
   }
 
   private selectGrant(t: Table, caller: Caller, target: InstanceId): string {
@@ -488,7 +501,10 @@ export class CallRouter {
     this.active.set(call, active);
     try {
       if (target.app.down || !target.app.manifest) throw new BridgeError("app_unavailable", 503);
-      const op = await this.effectiveOp(target);
+      // spec 0.1.68 (BRIDGE v0.1.68, cap `secret_output`): a secretOutput op answers app callers only; an agent is refused
+      // before anything runs (on every path: MCP, relay; the op is never listed for agents either)
+      if (caller.type === "agent" && isSecretOutputOp(target.op)) throw new BridgeError("secret_output_app_only", 403, "this operation answers app callers only");
+      const { op, tool: resolvedTool } = await this.effectiveOp(target);
       const grant = this.selectGrant(t0, caller, target.app.entry.ins);
       // 4. input against the op schema (dynamic: the fixed DynamicCallInput shape)
       const v = ctx.api.validateInput(target.op, req.input);
@@ -520,6 +536,10 @@ export class CallRouter {
           instance: target.app.entry.ins,
           product: target.app.entry.product,
           op: op.id,
+          // spec 0.1.68 (C336 RQ-2, BRIDGE §8.2, cap `hook_tool`): a dynamic call (listed entry, `<op>_call`, relay dynamic
+          // call) carries the resolution's canonical tool; crud/effect/holdFamily below are that resolution (effectiveOp).
+          // Absent for static ops (dynamic search never routes a call here).
+          ...(resolvedTool ? { tool: resolvedTool } : {}),
           crud: op.crud,
           effect: op.effect,
           ...(!op.standard && op.holdFamily ? { holdFamily: op.holdFamily } : {}),
@@ -576,8 +596,8 @@ export class CallRouter {
       this.requireListedHooks(t1, target1, op);
       // 10. forward
       const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context, hv);
-      // 12. after hooks (ok only)
-      if (result.status === "ok") {
+      // 12. after hooks (ok only). spec 0.1.68: never for a secretOutput op — the result goes to the caller only
+      if (result.status === "ok" && !isSecretOutputOp(target1.op)) {
         let output: JsonValue = result.output;
         active.inHook = true;
         for (const h of this.matchingHooks(t1, "after", target1, op)) {
@@ -640,7 +660,9 @@ export class CallRouter {
       },
       id.key,
     );
-    const body = JSON.stringify({ input, context, ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}) });
+    // spec 0.1.68: a secretOutput op is never replayed from a stored result; no key reaches the app (M-OP-11: idempotency none)
+    const idempotencyKey = isSecretOutputOp(target.op) ? undefined : req.idempotencyKey;
+    const body = JSON.stringify({ input, context, ...(idempotencyKey ? { idempotencyKey } : {}) });
     const url = new URL(`/tb/v1/ops/${opId}`, target.app.entry.internalUrl);
     const send = () =>
       this.ctx.fetch(url, {
