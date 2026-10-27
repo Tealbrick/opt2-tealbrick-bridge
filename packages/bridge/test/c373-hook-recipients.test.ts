@@ -168,6 +168,21 @@ describe("C373: hook recipients (B34, bridge part)", () => {
     expectRecipients(from, { recipients: ["telegram:-1001234567890"] });
   });
 
+  test("B34.slack_conversation: channel and DM ids are recipient handles; another prefix is incomplete", async () => {
+    places.chat_conv = SLACK;
+    const cases: [string, { recipients: string[]; recipientsIncomplete?: true }][] = [
+      ["C012ABCDEF", { recipients: ["slack:C012ABCDEF"] }],
+      ["D012ABCDEF", { recipients: ["slack:D012ABCDEF"] }],
+      ["X012ABCDEF", { recipients: [], recipientsIncomplete: true }],
+    ];
+    for (const [channel, want] of cases) {
+      const from = w.appLog.hooks.length;
+      const r = await mcpCall("notes__notes_tools_call", { tool: "chat_conv", arguments: { channel } });
+      assert.notEqual(r.isError, true, JSON.stringify(r));
+      expectRecipients(from, want);
+    }
+  });
+
   test("B34.known_none: places declared, the input names nobody (empty, null, missing) → []", async () => {
     places.chat_quiet = [{ pointer: "/channel", kind: "slack" }, { pointer: "/users", kind: "slack" }];
     for (const args of [{}, { channel: null }, { users: [] }]) {
