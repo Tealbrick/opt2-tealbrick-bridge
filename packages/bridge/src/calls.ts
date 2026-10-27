@@ -153,7 +153,15 @@ export const PARENT_CALL_TTL_MS = 120_000;
 /** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
 class HookBadAnswer extends Error {}
 
+/**
+ * Does a hook's `match` cover this call? MANIFEST §16 (Hooks): hooks match only `agent`-audience manifest operations reached through
+ * the bridge, never the standard `tb.*` ops, person ops or hook calls (Rules F2). So a standard op, or any op whose audience is not
+ * `agent`, never matches (not even a `products: ["*"]` hook with no `operations`): a hook outage must not fail `tb.holds_*`,
+ * `tb.hold_status` or `tb.receipts_list` closed. Used by the call path (`matchingHooks`, `requireListedHooks`) and by rule 6 of
+ * the event summaries (`eventHookMatches`). Hook calls themselves never route through here (`callHook` is not a call).
+ */
 function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Pick<Target, "app">, op: OperationView): boolean {
+  if (op.standard || op.audience !== "agent") return false;
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
 }
 
