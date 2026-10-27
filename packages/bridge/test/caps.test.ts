@@ -43,8 +43,8 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
       w.bridgeOps.answer = undefined;
     }
   },
-  // spec 0.1.81 (C373, BRIDGE "hook recipients"): an outward dynamic call whose resolution names places → the before hook sees the
-  // canonical handles of THIS call. Every path and edge case is c373-hook-recipients.test.ts (B33.*)
+  // spec next (C373, BRIDGE "hook recipients"): an outward dynamic call whose resolution names places → the before hook sees the
+  // canonical handles of THIS call. Every path and edge case is c373-hook-recipients.test.ts (B34.*)
   hook_recipients: async (w) => {
     const app = w.bridge.ctx.table?.apps.get(INS as never);
     const op = app?.ops.get("notes_list");
@@ -143,7 +143,7 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
 describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
   let w: World;
   before(async () => {
-    // spec 0.1.81: with the guard hook app, so the hook_recipients probe sees a before-hook request
+    // spec next: with the guard hook app, so the hook_recipients probe sees a before-hook request
     w = await makeWorld({ real: true, withHook: true });
     await waitFor(() => w.acks.length > 0 && w.bridge.ctx.table?.rev === w.rev(), 15000);
   });
@@ -154,7 +154,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
   test("the bridge declares exactly owner_rows, events, model_roles, hook_tool, app_hold_status, app_call_context and hook_recipients (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
     assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "hook_recipients"]);
     assert.equal((BRIDGE_CAPS_DECLARED as readonly string[]).includes("secret_output"), false, "C354: not before the bridge pins a validator that accepts secretOutput");
-    // spec 0.1.81: `hook_recipients` is in the spec PR (specs, label 0.1.81), not yet in the pinned spec; TODO(C373 re-pin): drop the skip
+    // spec next: `hook_recipients` is in the spec PR (specs#64, label next), not yet in the pinned spec; TODO(C373 re-pin): drop the skip
     for (const c of BRIDGE_CAPS_DECLARED) if (c !== "hook_recipients") assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 

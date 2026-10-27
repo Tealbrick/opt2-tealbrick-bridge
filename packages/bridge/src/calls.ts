@@ -351,7 +351,7 @@ export class CallRouter {
    */
   private async effectiveOp(t: Target): Promise<{ op: OperationView; tool?: string; recipientPlaces?: unknown }> {
     const op = t.op;
-    // spec 0.1.81 (C373): `recipients` = recipient places (static op: the manifest's; dynamic op: the cached resolution's), read
+    // spec next (C373): `recipients` = recipient places (static op: the manifest's; dynamic op: the cached resolution's), read
     // structurally until the spec pin types them
     if (op.standard || !op.dynamic) return { op, recipientPlaces: (op as { recipients?: unknown }).recipients };
     if (!t.tool) throw new BridgeError("input_invalid", 400, "dynamic tool missing");
@@ -567,9 +567,9 @@ export class CallRouter {
           crud: op.crud,
           effect: op.effect,
           ...(!op.standard && op.holdFamily ? { holdFamily: op.holdFamily } : {}),
-          // spec 0.1.81 (C373, G-6, cap `hook_recipients`): who an outward call talks to, read from THIS input at the op's or the
+          // spec next (C373, G-6, cap `hook_recipients`): who an outward call talks to, read from THIS input at the op's or the
           // resolution's places; the same for agent and app callers, every hook phase. Absent = unknown. Never logged.
-          ...hookRecipients(op.effect, recipientPlaces, resolvedTool !== undefined, req.input),
+          ...hookRecipients(op, recipientPlaces, resolvedTool !== undefined, req.input),
         },
         input: req.input as JsonValue,
       };

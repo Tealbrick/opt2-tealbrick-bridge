@@ -1,13 +1,13 @@
 /**
- * spec 0.1.81 (unreleased label; C373, G-6; BRIDGE "hook recipients", cap `hook_recipients`; CONFORMANCE B33 rows, bridge part):
- * - B33.static_op: an outward static op with places → every hook phase sees `call.target.recipients` read from THIS input
+ * spec next (unreleased; C373, G-6; BRIDGE "hook recipients", cap `hook_recipients`; CONFORMANCE B34 rows, bridge part):
+ * - B34.static_op: an outward static op with places → every hook phase sees `call.target.recipients` read from THIS input
  *   (canonical, de-duplicated, sorted); agent and app callers see the same.
- * - B33.dynamic_op: a dynamic tool whose (cached) resolution names places in `arguments` → the same, on `<op>_call` over MCP and on
+ * - B34.dynamic_op: a dynamic tool whose (cached) resolution names places in `arguments` → the same, on `<op>_call` over MCP and on
  *   the companion path.
- * - B33.known_none / B33.incomplete / B33.absent: `[]`; a bad value or > 64 → `recipientsIncomplete`; a read op, an outward op
+ * - B34.known_none / B34.incomplete / B34.absent: `[]`; a bad value or > 64 → `recipientsIncomplete`; a read op, an outward op
  *   without places and a resolution without places → no `recipients` member. No value appears in a bridge log line.
  * The pinned validator (manifest 0.1.30) refuses a manifest that declares op places, so the static ops are placed into the routing
- * table directly (`// spec 0.1.81`), as c336-hook-tool-secret.test.ts does for secretOutput.
+ * table directly (`// spec next`), as c336-hook-tool-secret.test.ts does for secretOutput.
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -41,7 +41,7 @@ const tools = {
 };
 const manifest = { ...notesManifest, version: "1.7.3", operations: [...notesManifest.operations, tools] };
 
-describe("C373: hook recipients (B33, bridge part)", () => {
+describe("C373: hook recipients (B34, bridge part)", () => {
   let w: World;
   const lines: string[] = [];
   let appKey: Awaited<ReturnType<World["api"]["generateKeyPair"]>>;
@@ -69,7 +69,9 @@ describe("C373: hook recipients (B33, bridge part)", () => {
     w.bridgeOps.answer = (path, body) => {
       if (path !== "resolve") return undefined;
       const tool = String(body.tool);
-      return { tool, crud: ["create"], effect: "outward", holdFamily: "outward", ...(places[tool] !== undefined ? { recipients: places[tool] } : {}) };
+      // `*_famsend` tools resolve as write + holdFamily outward (QA-RCP-7: outward by family)
+      const cls = tool.endsWith("_famsend") ? { effect: "write", holdFamily: "outward" } : { effect: "outward", holdFamily: "outward" };
+      return { tool, crud: ["create"], ...cls, ...(places[tool] !== undefined ? { recipients: places[tool] } : {}) };
     };
   });
   after(async () => {
@@ -117,7 +119,7 @@ describe("C373: hook recipients (B33, bridge part)", () => {
   /** a static op with places, placed into the table for the test (the pinned validator refuses the manifest field) */
   const withStaticOp = async (id: string, base: string, recipients: unknown, fn: (op: OperationView) => Promise<void>) => {
     const ops = app().ops as Map<string, OperationView>;
-    const op = { ...(ops.get(base) as OperationView), id, ...(recipients !== undefined ? { recipients } : {}) } as unknown as OperationView; // spec 0.1.81
+    const op = { ...(ops.get(base) as OperationView), id, ...(recipients !== undefined ? { recipients } : {}) } as unknown as OperationView; // spec next
     ops.set(id, op);
     try {
       await fn(op);
@@ -126,7 +128,7 @@ describe("C373: hook recipients (B33, bridge part)", () => {
     }
   };
 
-  test("B33.static_op: agent caller — places in the input, canonical, de-duplicated, sorted, on every phase; app caller sees the same", async () => {
+  test("B34.static_op: agent caller — places in the input, canonical, de-duplicated, sorted, on every phase; app caller sees the same", async () => {
     const input = { to: ["B@Example.com", "a@example.com", "email:a@example.com"], cc: null, people: { lead: "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6" } };
     const want = { recipients: ["buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "email:a@example.com", "email:b@example.com"] };
     await withStaticOp("notes_send_to", "notes_send", [{ pointer: "/to", kind: "email" }, { pointer: "/cc", kind: "email" }, { pointer: "/people/lead", kind: "buzz" }], async (op) => {
@@ -141,7 +143,7 @@ describe("C373: hook recipients (B33, bridge part)", () => {
     });
   });
 
-  test("B33.dynamic_op: `<op>_call` over MCP and the companion path — places of the cached resolution, values of THIS call", async () => {
+  test("B34.dynamic_op: `<op>_call` over MCP and the companion path — places of the cached resolution, values of THIS call", async () => {
     places.chat_send = SLACK;
     let from = w.appLog.hooks.length;
     const r = await mcpCall("notes__notes_tools_call", { tool: "chat_send", arguments: { channel: "u012abcdef", text: "hi" } });
@@ -158,7 +160,15 @@ describe("C373: hook recipients (B33, bridge part)", () => {
     expectRecipients(from, { recipients: ["slack:U012ABCDEF"] });
   });
 
-  test("B33.known_none: places declared, the input names nobody (empty, null, missing) → []", async () => {
+  test("B34.dynamic_op: outward by holdFamily (effect write), and telegram chat ids as JSON integers", async () => {
+    places.tg_famsend = [{ pointer: "/chat_id", kind: "telegram" }];
+    const from = w.appLog.hooks.length;
+    const r = await mcpCall("notes__notes_tools_call", { tool: "tg_famsend", arguments: { chat_id: -1001234567890 } });
+    assert.notEqual(r.isError, true, JSON.stringify(r));
+    expectRecipients(from, { recipients: ["telegram:-1001234567890"] });
+  });
+
+  test("B34.known_none: places declared, the input names nobody (empty, null, missing) → []", async () => {
     places.chat_quiet = [{ pointer: "/channel", kind: "slack" }, { pointer: "/users", kind: "slack" }];
     for (const args of [{}, { channel: null }, { users: [] }]) {
       const from = w.appLog.hooks.length;
@@ -168,7 +178,7 @@ describe("C373: hook recipients (B33, bridge part)", () => {
     }
   });
 
-  test("B33.incomplete: a bad value is dropped and flags the list; more than 64 → the first 64 and the flag; malformed places → [] and the flag", async () => {
+  test("B34.incomplete: a bad value is dropped and flags the list; more than 64 → the first 64 and the flag; malformed places → [] and the flag", async () => {
     await withStaticOp("notes_send_to", "notes_send", [{ pointer: "/to", kind: "email" }], async (op) => {
       const cases: [unknown, { recipients: string[]; recipientsIncomplete: true }][] = [
         [["Name <x@example.com>", "ok@example.com"], { recipients: ["email:ok@example.com"], recipientsIncomplete: true }],
@@ -193,7 +203,7 @@ describe("C373: hook recipients (B33, bridge part)", () => {
     expectRecipients(from, { recipients: [], recipientsIncomplete: true });
   });
 
-  test("B33.absent: a read op (even with places), an outward op without places, a resolution without places → no recipients member", async () => {
+  test("B34.absent: a read op (even with places), an outward op without places, a resolution without places → no recipients member", async () => {
     await withStaticOp("notes_list_to", "notes_list", [{ pointer: "/to", kind: "email" }], async (op) => {
       const from = w.appLog.hooks.length;
       await new CallRouter(w.bridge.ctx).route({ caller: agent, target: { app: app(), op }, input: { to: "a@example.com" } as never });
