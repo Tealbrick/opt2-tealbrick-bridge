@@ -33,8 +33,9 @@
  *    the presented grant's verified `prd` (400 `input_invalid` + `details.pointer`), merged into the op body `context` before the
  *    before hooks and bound by the op proof's `ctx` digest (calls.ts `route`, app-calls.ts `callerContextKeys`).
  *  - `secret_output` (spec 0.1.68, MANIFEST M-OP-12) is NOT declared yet (C354, BRIDGE23-3): the secretOutput code paths are in
- *    (tools.ts `visibleOps`, calls.ts `route` / `forward`), but this build pins a manifest validator (0.1.32) that refuses a
- *    manifest with `secretOutput`, so no such app can run here. Declare it in the change that re-pins manifest >= 0.1.31.
+ *    (tools.ts `visibleOps`, calls.ts `route` / `forward`), but declaring it is its own change (C354). The pinned manifest 0.1.32
+ *    accepts a well-formed `secretOutput` manifest with `requires.bridgeCaps: ["secret_output"]`; this build refuses it at
+ *    registration (`missingBridgeCap` → `bridge_cap_missing`) because the cap is not declared, so no such app runs here.
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 

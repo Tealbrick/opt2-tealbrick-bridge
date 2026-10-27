@@ -200,7 +200,7 @@ export class CallRouter {
     this.shutdown.abort();
     return this.active.size;
   }
-  private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
+  private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution; digest: string }>();
   private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
   /** QA-P5-3: instance → the release digest its cached resolutions came from */
   private readonly resolvedDigest = new Map<string, string>();
@@ -335,7 +335,8 @@ export class CallRouter {
   private async resolve(app: AppRuntime, op: string, tool: string): Promise<DynamicResolution> {
     const key = `${app.entry.ins}|${op}|${tool}`;
     const hit = this.resolveCache.get(key);
-    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.value;
+    // QA-BR29-3: a hit counts only for the release that runs now (a resolve in flight across a table swap keeps the old digest)
+    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS && hit.digest === String(app.digest ?? app.entry.manifestDigest)) return hit.value;
     let value: DynamicResolution;
     try {
       value = await this.bridgeOp<DynamicResolution>(app, "resolve", { op, tool });
@@ -358,7 +359,7 @@ export class CallRouter {
       throw new BridgeError("dynamic_resolve_failed", 403, "the app's resolution names a different or malformed tool", { reason: "tool_mismatch" });
     }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
-    this.resolveCache.set(key, { at: Date.now(), value });
+    this.resolveCache.set(key, { at: Date.now(), value, digest: String(app.digest ?? app.entry.manifestDigest) });
     this.resolvedDigest.set(String(app.entry.ins), String(app.digest ?? app.entry.manifestDigest));
     return value;
   }
@@ -547,13 +548,21 @@ export class CallRouter {
       // v0.1.77 (C367 P3, BRIDGE §8.3, PK-D6): the ownership rule of `tb.hold_status` lives in the target's SDK, so an APP caller
       // reaches it only on a target whose last reported `sdkVersion` (the status push) is at least APP_HOLD_STATUS_MIN_SDK. Lower,
       // unknown or malformed → refused here, before any hook; the target is not called. Agent calls are unchanged.
-      if (caller.type === "app" && op.standard && op.id === APP_HOLD_STATUS_OP && !sdkVersionAtLeast(ctx.health.get(target.app.entry.ins)?.status.sdkVersion, APP_HOLD_STATUS_MIN_SDK)) {
+      // QA-BR29-1: the status counts only when it was pushed by the version the config names now (serving or update candidate),
+      // so a rollback to an older SDK is not trusted on the last push of the newer one.
+      const pushed = ctx.health.get(target.app.entry.ins)?.status;
+      const named = [target.app.entry.version, target.app.entry.candidateVersion].filter((v) => typeof v === "string");
+      if (caller.type === "app" && op.standard && op.id === APP_HOLD_STATUS_OP && (!pushed || !named.includes(pushed.version) || !sdkVersionAtLeast(pushed.sdkVersion, APP_HOLD_STATUS_MIN_SDK))) {
         throw new BridgeError("not_in_workflow", 403, "the target app does not answer hold status for app callers yet");
       }
       // v0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): the caller context, checked against the VERIFIED product of the
       // presented grant (its `prd`; never the envelope, never the instance table), after the grant is selected and before any hook.
       // Absent or `{}` = none. Informational only: nothing below (gate, grant checks, hook authority) reads it.
-      const callerKeys = caller.type === "app" ? callerContextKeys(req.callerContext, grantPrd ?? null) : undefined;
+      // QA-BR29-2: when the grant's `prd` and the instance table disagree (see below), no product is verified: a non-empty
+      // context is then refused like a caller without a verified product (PK-D3).
+      const tableProductForContext = caller.type === "app" ? t0.apps.get(caller.ins)?.entry.product : undefined;
+      const verifiedPrd = grantPrd !== undefined && grantPrd === tableProductForContext ? grantPrd : null;
+      const callerKeys = caller.type === "app" ? callerContextKeys(req.callerContext, verifiedPrd) : undefined;
       // HOOK-CALLER-PRODUCT + GRANT-PRD (spec 0.1.46): the product of an app caller comes from the bridge's own signed
       // config (the instance table). When the presented companion grant also carries `prd` and it differs, the two
       // sources disagree: the hook request carries NO product (a policy app then treats the caller as unverified) and the

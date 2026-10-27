@@ -35,7 +35,7 @@ const LEAK = "VALUE-MUST-NOT-ECHO-7c1e";
 let w: World;
 let a: AppClient; // instance INS, product notes (caller A, and the target)
 let g: AppClient; // instance HOOKINS, product guard (caller G, a hook app of product guard)
-const grants = { hs: "", hsNoCrud: "", plain: "", noPrd: "", guard: "" };
+const grants = { hs: "", hsNoCrud: "", plain: "", noPrd: "", guard: "", wrongPrd: "" };
 const jtis = new Map<string, string>();
 /** the guard app's hook answers: before allows, the context hook adds `add`, the after hook changes nothing */
 const answers = (add: Record<string, unknown> = {}) => (hook: string) => (hook === "enrich" ? { add } : hook === "audit" ? {} : undefined);
@@ -58,9 +58,11 @@ function useWorld(): void {
     grants.plain = await mint(INS, ["notes_list", "notes_send"], { prd: "notes", crud: ["read", "create"] });
     grants.noPrd = await mint(INS, ["notes_list", "tb.hold_status"]);
     grants.guard = await mint(HOOKINS, ["notes_list", "tb.hold_status"], { prd: "guard" });
+    // QA-BR29-2: a grant whose prd disagrees with the instance table (notes)
+    grants.wrongPrd = await mint(INS, ["notes_list"], { prd: "kanban" });
     const slice = (ins: string, product: string, list: string[]) =>
       w.signPortal("tb-slice+jws", { v: 1, iss: "tb:portal", sub: `tb:ins:${ins}`, aud: `tb:ins:${ins}`, iat: now(), exp: now() + 43200, jti: w.api.ulid(), ws: WS, rev: 2, ins, product, grants: list });
-    const sliceA = await slice(INS, "notes", [grants.hs, grants.hsNoCrud, grants.plain, grants.noPrd]);
+    const sliceA = await slice(INS, "notes", [grants.hs, grants.hsNoCrud, grants.plain, grants.noPrd, grants.wrongPrd]);
     const sliceG = await slice(HOOKINS, "guard", [grants.guard]);
     await w.publish((c) => {
       for (const app of c.apps) (app as { slice: string }).slice = app.ins === INS ? sliceA : sliceG;
@@ -151,6 +153,15 @@ describe("C367 P3: tb.hold_status for an app caller (B31)", () => {
     assert.equal((await holdStatus(grants.hs)).json?.error?.code, "not_in_workflow");
     await reported("0.1.41");
     assert.equal((await holdStatus(grants.hs)).status, 200);
+  });
+
+  test("QA-BR29-1: only a status push of the version the config names counts (a push of another version, e.g. before a rollback, is not trusted)", async () => {
+    assert.ok([200, 204].includes(await a.status({ sdkVersion: "0.1.41", version: "9.9.9" })), "status accepted");
+    const m = mark();
+    assert.equal((await holdStatus(grants.hs)).json?.error?.code, "not_in_workflow");
+    untouched(m, "a push of a version the config does not name");
+    await reported("0.1.41");
+    assert.equal((await holdStatus(grants.hs)).status, 200, "the named version's push counts again");
   });
 
   test("B31.hold_status_undeclared: a grant whose wf does not list tb.hold_status → not_in_workflow, the app never sees it", async () => {
@@ -299,6 +310,15 @@ describe("C367 P4: caller context on a companion call (B32)", () => {
     untouched(m, "no prd");
     assert.equal((await callA(grants.noPrd, { op: "notes_list", input: {}, context: {} })).status, 200);
     assert.equal((await callA(grants.noPrd, { op: "notes_list", input: {} })).status, 200);
+  });
+
+  test("QA-BR29-2: a grant prd that disagrees with the instance table verifies no product: a non-empty context is refused (/context), {} runs", async () => {
+    const m = mark();
+    const r = await callA(grants.wrongPrd, { op: "notes_list", input: {}, context: { "kanban.run": "run_1" } });
+    assert.equal(r.status, 400, r.text);
+    assert.deepEqual(r.json?.error.details, { pointer: "/context" });
+    untouched(m, "prd mismatch");
+    assert.equal((await callA(grants.wrongPrd, { op: "notes_list", input: {}, context: {} })).status, 200);
   });
 
   test("the product is the grant's prd, never the envelope: an envelope naming another product changes nothing", async () => {
