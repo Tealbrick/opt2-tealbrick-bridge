@@ -202,6 +202,8 @@ export class CallRouter {
   }
   private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
   private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
+  /** QA-P5-3: instance → the release digest its cached resolutions came from */
+  private readonly resolvedDigest = new Map<string, string>();
   readonly counters = new Map<string, number>();
 
   constructor(ctx: BridgeContext) {
@@ -213,6 +215,14 @@ export class CallRouter {
       // an instance that left the table never answers again: its cached catalogs go (review: the cache is pruned)
       const live = new Set([...(next?.apps.values() ?? [])].map((a) => String(a.entry.ins)));
       for (const key of this.catalogCache.keys()) if (!live.has(key.slice(0, key.indexOf("|")))) this.catalogCache.delete(key);
+      // QA-P5-3: a resolution belongs to the release that answered it; an instance that left or now runs another release
+      // (digest changed: update, rollback, candidate) resolves again, so a reclassified tool never keeps its old crud/effect
+      const running = new Map([...(next?.apps.values() ?? [])].map((a) => [String(a.entry.ins), String(a.digest ?? a.entry.manifestDigest)]));
+      for (const [ins, digest] of this.resolvedDigest) {
+        if (running.get(ins) === digest) continue;
+        this.resolvedDigest.delete(ins);
+        for (const key of this.resolveCache.keys()) if (key.startsWith(`${ins}|`)) this.resolveCache.delete(key);
+      }
     });
     // C283 A1: `admitted` marks follow the app's owner rows, which changed
     ctx.on("scopes", () => this.expireCatalogs());
@@ -349,6 +359,7 @@ export class CallRouter {
     }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
     this.resolveCache.set(key, { at: Date.now(), value });
+    this.resolvedDigest.set(String(app.entry.ins), String(app.digest ?? app.entry.manifestDigest));
     return value;
   }
 
