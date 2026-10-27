@@ -262,7 +262,10 @@ export class InternalApi {
       throw e;
     }
     // C268c: an APP-INSTANCE claim sets the hook proof capabilities (the claim's set); a companion service claim never does
-    if (!service) ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
+    if (!service) {
+      ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
+      ctx.appCaps.onClaim(entry.ins, r.caps);
+    }
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
     sendJson(res, 200, out);
@@ -283,10 +286,14 @@ export class InternalApi {
       const entry = ctx.table?.apps.get(caller.ins)?.entry;
       ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims, caller.iat, entry ? [entry.version, entry.candidateVersion] : []);
       if (!prev || prev.status.scopesRev !== body.scopesRev) void refreshScopeSummary(this.ctx, this.router, caller.ins, true);
+      // C373 P1 (BRIDGE §8.6 rule 7): the push states the app's current caps; a change reaches Portal at once (Core's workflow-grant gate reads them)
+      const capsBefore = JSON.stringify(ctx.appCaps.get(caller.ins) ?? null);
+      ctx.appCaps.onStatus(caller.ins, body.caps, caller.iat);
+      const capsChanged = capsBefore !== JSON.stringify(ctx.appCaps.get(caller.ins) ?? null);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
       // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)
       const upgradeChanged = JSON.stringify(upgradeFields(prev?.status)) !== JSON.stringify(upgradeFields(body));
-      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged || upgradeChanged) ctx.emit("health");
+      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged || upgradeChanged || capsChanged) ctx.emit("health");
     }
     const wait = Math.min(Math.max(Number(url.searchParams.get("wait") ?? 0) || 0, 0), 60);
     const answer = (): AppStatusResponse | undefined => {

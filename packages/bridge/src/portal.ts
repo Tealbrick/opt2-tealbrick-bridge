@@ -9,6 +9,7 @@ import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConf
 import { type ConnectionId, LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "@opt2-tealbrick/spec/sdk";
+import { reportedCaps } from "./app-reported-caps.ts";
 import { bridgeCaps, missingBridgeCap } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { roleStatuses } from "./model-roles.ts";
@@ -410,6 +411,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       // spec 0.1.39 (C213 US-2, miniapp-sdk 0.1.25): schemaVersion / minCompatibleCode / failure, shape-checked and copied
       // unchanged; absent or malformed stays absent (L24). Core's health-gated update and rollback read them.
       ...upgradeFields(h?.status),
+      // C373 P1 (BRIDGE §8.6 rule 7, spec 0.1.82): AppStatus.caps as the app last reported it, normalised; malformed or absent stays absent
+      ...reportedCaps(ctx.appCaps.get(a.entry.ins)),
     };
   });
   const keys = (t ? keyRequirements(t) : [])
