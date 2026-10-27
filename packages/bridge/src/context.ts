@@ -11,6 +11,7 @@ import type { AppStatus, ScopeSourceItem } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { PERSONA_MAX_CHARS, PERSONA_PATTERN } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
+import { AppCaps } from "./app-reported-caps.ts";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
 import type { BridgeState, Identity } from "./state.ts";
@@ -103,6 +104,8 @@ export class BridgeContext extends EventEmitter {
   readonly health = new Map<InstanceId, AppHealth>();
   /** C268c: which hook apps accept `bd` in the call proof (proof-caps.ts) */
   readonly proofCaps = new ProofCaps();
+  /** C373 P1 (BRIDGE §8.6 rule 7): `AppStatus.caps` of each app instance, copied into the status report */
+  readonly appCaps = new AppCaps();
   /** spec 0.1.65 (C331 D8): `sources` = the app's scope instances of that agent, as cleaned in scope-summary.ts (absent = not reported) */
   readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string; sources?: ScopeSourceItem[] }>();
   /** when each app instance was last asked for its scope summary (ms), and the request in flight (scope-summary.ts) */
@@ -206,6 +209,7 @@ export class BridgeContext extends EventEmitter {
     this.table = next;
     // C268c: a config change of an app's digest, version or update candidate drops its hook proof capabilities, before any call uses the new table
     this.proofCaps.onTable(next, prev);
+    this.appCaps.onTable(next);
     // BRIDGE §15.6: a persona over PERSONA_MAX_CHARS or outside PERSONA_PATTERN is dropped for that agent (mcp.ts) and
     // counted once per table (the detail names the agent and the length, never the text)
     for (const a of next.agents.values()) {

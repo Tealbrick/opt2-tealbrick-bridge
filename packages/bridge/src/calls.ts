@@ -17,14 +17,22 @@ import type {
 import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
+import { APP_HOLD_STATUS_MIN_SDK, APP_HOLD_STATUS_OP, callerContextKeys, sdkVersionAtLeast } from "./app-calls.ts";
 import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
 import { isSecretOutputOp } from "./tools.ts";
 import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
+import { WORKFLOW_GATE_VERDICTS, workflowGate } from "./workflow-grants.ts";
 
 export type Caller =
   | { type: "agent"; agt: `agt_${string}`; con: `con_${string}` }
-  | { type: "app"; ins: InstanceId; grant: string };
+  | {
+      type: "app";
+      ins: InstanceId;
+      grant: string;
+      /** C373 P1 (BRIDGE §8.6, cap `app_workflow_grants`): `CallEnvelope.workflow` as sent (shape-checked); the gate binds it to the grant's `wfl` */
+      workflow?: string;
+    };
 
 export interface Target {
   app: AppRuntime;
@@ -42,6 +50,12 @@ export interface CallRequest {
   signal?: AbortSignal;
   /** bridge-written `tb.*` context (BRIDGE §8.5), set BEFORE the before hooks; e.g. `tb.onBehalfOf` */
   reservedContext?: JsonObject;
+  /**
+   * v0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): `CallEnvelope.context` exactly as the app caller sent it (`undefined` =
+   * absent). Companion path only; `route` validates it against the VERIFIED product of the presented grant, after the grant is
+   * selected and before any hook, and merges the keys into the op body `context`.
+   */
+  callerContext?: unknown;
 }
 
 export type CallOutcome = OpResult<JsonValue>;
@@ -77,6 +91,8 @@ const BRIDGE_VERDICTS: ReadonlySet<string> = new Set([
   "not_in_workflow",
   "audience_not_agent",
   "scope_type_unknown",
+  // C373 P1 (BRIDGE §8.6): the workflow-grant gate
+  ...WORKFLOW_GATE_VERDICTS,
 ]);
 const APP_CODE_RULE = /^[a-z][a-z0-9_]{1,40}$/;
 
@@ -110,6 +126,7 @@ const METRIC_CODES: ReadonlySet<string> = new Set([
   "payload_too_large",
   "rate_limited",
   "request_timeout",
+  ...WORKFLOW_GATE_VERDICTS,
 ]);
 
 /** Maps any code to the fixed metric label set (H-5). */
@@ -146,7 +163,15 @@ export const PARENT_CALL_TTL_MS = 120_000;
 /** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
 class HookBadAnswer extends Error {}
 
+/**
+ * Does a hook's `match` cover this call? MANIFEST §16 (Hooks): hooks match only `agent`-audience manifest operations reached through
+ * the bridge, never the standard `tb.*` ops, person ops or hook calls (Rules F2). So a standard op, or any op whose audience is not
+ * `agent`, never matches (not even a `products: ["*"]` hook with no `operations`): a hook outage must not fail `tb.holds_*`,
+ * `tb.hold_status` or `tb.receipts_list` closed. Used by the call path (`matchingHooks`, `requireListedHooks`) and by rule 6 of
+ * the event summaries (`eventHookMatches`). Hook calls themselves never route through here (`callHook` is not a call).
+ */
 function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Pick<Target, "app">, op: OperationView): boolean {
+  if (op.standard || op.audience !== "agent") return false;
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
 }
 
@@ -187,6 +212,8 @@ export class CallRouter {
   }
   private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
   private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
+  /** QA-P5-3: instance → the release digest its cached resolutions came from */
+  private readonly resolvedDigest = new Map<string, string>();
   readonly counters = new Map<string, number>();
 
   constructor(ctx: BridgeContext) {
@@ -198,6 +225,14 @@ export class CallRouter {
       // an instance that left the table never answers again: its cached catalogs go (review: the cache is pruned)
       const live = new Set([...(next?.apps.values() ?? [])].map((a) => String(a.entry.ins)));
       for (const key of this.catalogCache.keys()) if (!live.has(key.slice(0, key.indexOf("|")))) this.catalogCache.delete(key);
+      // QA-P5-3: a resolution belongs to the release that answered it; an instance that left or now runs another release
+      // (digest changed: update, rollback, candidate) resolves again, so a reclassified tool never keeps its old crud/effect
+      const running = new Map([...(next?.apps.values() ?? [])].map((a) => [String(a.entry.ins), String(a.digest ?? a.entry.manifestDigest)]));
+      for (const [ins, digest] of this.resolvedDigest) {
+        if (running.get(ins) === digest) continue;
+        this.resolvedDigest.delete(ins);
+        for (const key of this.resolveCache.keys()) if (key.startsWith(`${ins}|`)) this.resolveCache.delete(key);
+      }
     });
     // C283 A1: `admitted` marks follow the app's owner rows, which changed
     ctx.on("scopes", () => this.expireCatalogs());
@@ -334,6 +369,7 @@ export class CallRouter {
     }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
     this.resolveCache.set(key, { at: Date.now(), value });
+    this.resolvedDigest.set(String(app.entry.ins), String(app.digest ?? app.entry.manifestDigest));
     return value;
   }
 
@@ -377,9 +413,16 @@ export class CallRouter {
     if (caller.type === "app") {
       const v = this.ctx.api.verifyGrant(grant, trustFor(t, target.app.entry.ins, now));
       if (!("claims" in v) || v.claims.sub !== insRef(caller.ins)) throw new BridgeError("grant_invalid", 403);
+      // C373 P1 (BRIDGE §8.6 rule 2, right after the subject check): envelope `workflow` ⇔ grant `wfl`; a workflow grant is checked against
+      // the config's withdrawal records, `wflEpoch`, `workflowGrantEdges` and `appsPolicy.held` instead of slice membership
+      const isWorkflowGrant = workflowGate(this.ctx, t, caller.ins, v.claims as CompanionGrantClaims, caller.workflow);
+      // v0.1.77 (C367 P3, BRIDGE §8.3, cap `app_hold_status`): gate() lets `tb.hold_status` pass on any valid grant (I4 skips the
+      // CRUD ceiling and the workflow step), which is right for an agent. An APP caller needs the op in its companion grant's `wf`
+      // (MANIFEST M-CP-3 mints it there): not listed → `not_in_workflow`, like any op outside `wf`. Never for another standard op.
+      if (op.standard && op.id === APP_HOLD_STATUS_OP && !(v.claims.wf as readonly string[]).includes(APP_HOLD_STATUS_OP)) throw new BridgeError("not_in_workflow", 403);
       // C70: a valid grant that is not in the caller's CURRENT slice was minted under an older revision → the SDK
       // re-reads its slice once and retries (grant_expired stays the code for exp)
-      const current = sliceGrants(t.apps.get(caller.ins));
+      const current = isWorkflowGrant ? undefined : sliceGrants(t.apps.get(caller.ins));
       if (current && !current.includes(grant)) throw new BridgeError("grant_stale", 403, "the grant is from an older slice revision; re-read the slice");
       return (v.claims as CompanionGrantClaims).prd;
     }
@@ -514,6 +557,16 @@ export class CallRouter {
       }
       // 5. gate
       const grantPrd = this.runGate(t0, caller, target, op, grant);
+      // v0.1.77 (C367 P3, BRIDGE §8.3, PK-D6): the ownership rule of `tb.hold_status` lives in the target's SDK, so an APP caller
+      // reaches it only on a target whose last reported `sdkVersion` (the status push) is at least APP_HOLD_STATUS_MIN_SDK. Lower,
+      // unknown or malformed → refused here, before any hook; the target is not called. Agent calls are unchanged.
+      if (caller.type === "app" && op.standard && op.id === APP_HOLD_STATUS_OP && !sdkVersionAtLeast(ctx.health.get(target.app.entry.ins)?.status.sdkVersion, APP_HOLD_STATUS_MIN_SDK)) {
+        throw new BridgeError("not_in_workflow", 403, "the target app does not answer hold status for app callers yet");
+      }
+      // v0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): the caller context, checked against the VERIFIED product of the
+      // presented grant (its `prd`; never the envelope, never the instance table), after the grant is selected and before any hook.
+      // Absent or `{}` = none. Informational only: nothing below (gate, grant checks, hook authority) reads it.
+      const callerKeys = caller.type === "app" ? callerContextKeys(req.callerContext, grantPrd ?? null) : undefined;
       // HOOK-CALLER-PRODUCT + GRANT-PRD (spec 0.1.46): the product of an app caller comes from the bridge's own signed
       // config (the instance table). When the presented companion grant also carries `prd` and it differs, the two
       // sources disagree: the hook request carries NO product (a policy app then treats the caller as unverified) and the
@@ -531,7 +584,8 @@ export class CallRouter {
           caller.type === "agent"
             ? { type: "agent" as const, id: caller.agt, ...(t0.agents.get(caller.agt) ? { mode: t0.agents.get(caller.agt)?.mode } : {}) }
             : // never from input, a header or a manifest name; an instance the table cannot map carries none (see above)
-              { type: "app" as const, id: caller.ins, ...(callerProduct ? { product: callerProduct } : {}) },
+              // C373 P1: `workflow` = the grant's verified `wfl` (runGate refused any envelope workflow that differs from it)
+              { type: "app" as const, id: caller.ins, ...(callerProduct ? { product: callerProduct } : {}), ...(caller.workflow ? { workflow: caller.workflow } : {}) },
         target: {
           instance: target.app.entry.ins,
           product: target.app.entry.product,
@@ -546,7 +600,10 @@ export class CallRouter {
         },
         input: req.input as JsonValue,
       };
-      let context: JsonObject = { ...(req.reservedContext ?? {}) };
+      // the caller's keys first (v0.1.77, §8.5), then the bridge's reserved `tb.*` keys: the two sets never overlap (a caller key
+      // is `<product>.…` and `tb.` is refused), the order only states who owns a collision. Hooks and the app see both, and the
+      // op proof's `ctx` digest covers them.
+      let context: JsonObject = { ...(callerKeys ?? {}), ...(req.reservedContext ?? {}) };
       // 6. before hooks (fail closed). v0.1.13: answers allow | refuse | hold, shape-checked and reduced by the shared
       // rule (manifest hookResponseProblem + reduceBeforeChain): the first refuse stops the chain at once; else the
       // FIRST hold is kept and the remaining hooks still run (a later refuse wins). Runs for every call, a retry
@@ -623,7 +680,7 @@ export class CallRouter {
       this.count(`call|${target.app.entry.product}|${metricCode(code)}`);
       ctx.log.info(caller.type === "app" && !req.parentCall ? "call.app_initiated" : "bridge.call", {
         call,
-        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins, parentCall: req.parentCall ?? null }),
+        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins, parentCall: req.parentCall ?? null, ...(caller.workflow ? { wfl: caller.workflow } : {}) }),
         product: target.app.entry.product,
         op: target.op.id,
         decision: code === "ok" ? "forwarded" : "refused",

@@ -23,6 +23,7 @@ import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
+import { envelopeWorkflow, readRelayBody, WORKFLOW_GRANT_ROUTES, WorkflowGrantRelay } from "./workflow-grants.ts";
 
 interface InstanceCaller {
   /** `iat` of the verified instance assertion (epoch s) */
@@ -64,11 +65,14 @@ export class InternalApi {
   private readonly appInitiated = new TokenBucket(APP_INITIATED_LIMIT.perMinute / 60, APP_INITIATED_LIMIT.burst);
   /** BRG-12 (L31): digests of one-time codes whose claim is in progress (reserved before the first await) */
   private readonly claiming = new Set<string>();
+  /** C373 P1 (BRIDGE §8.6): the three workflow-grant relays to Core */
+  private readonly workflowGrants: WorkflowGrantRelay;
 
   constructor(ctx: BridgeContext, router: CallRouter, views?: ViewsRoute) {
     this.ctx = ctx;
     this.router = router;
     this.views = views;
+    this.workflowGrants = new WorkflowGrantRelay(ctx);
     ctx.on("table", (next: Table | undefined, prev: Table | undefined) => {
       this.wake();
       // C283 A1: the SDK gives its display marks (`admittedOps`, `admitted`) only to an agent that is not paused, and a pause
@@ -150,6 +154,13 @@ export class InternalApi {
       if (req.method === "POST" && url.pathname === BRIDGE_INTERNAL_PATHS.events) {
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
         return await this.ingestEvents(req, res, requestId);
+      }
+      const wfgKind = req.method === "POST" ? WORKFLOW_GRANT_ROUTES.get(url.pathname) : undefined;
+      if (wfgKind) {
+        if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
+        const raw = await readRelayBody(req);
+        // the asking instance is the one that signed TB-Assert (bound to method, path and body); Core gets it as `ins`
+        return await this.workflowGrants.handle(wfgKind, this.assertCaller(req, raw), raw, res, requestId);
       }
       if (req.method === "GET" && url.pathname === "/metrics") return this.metrics(res);
       sendJson(res, 404, envelope("not_found", "not found", requestId));
@@ -251,7 +262,10 @@ export class InternalApi {
       throw e;
     }
     // C268c: an APP-INSTANCE claim sets the hook proof capabilities (the claim's set); a companion service claim never does
-    if (!service) ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
+    if (!service) {
+      ctx.proofCaps.onClaim(entry.ins, r.version, r.proofClaims);
+      ctx.appCaps.onClaim(entry.ins, r.caps);
+    }
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
     sendJson(res, 200, out);
@@ -272,10 +286,14 @@ export class InternalApi {
       const entry = ctx.table?.apps.get(caller.ins)?.entry;
       ctx.proofCaps.onStatus(caller.ins, body.version, body.proofClaims, caller.iat, entry ? [entry.version, entry.candidateVersion] : []);
       if (!prev || prev.status.scopesRev !== body.scopesRev) void refreshScopeSummary(this.ctx, this.router, caller.ins, true);
+      // C373 P1 (BRIDGE §8.6 rule 7): the push states the app's current caps; a change reaches Portal at once (Core's workflow-grant gate reads them)
+      const capsBefore = JSON.stringify(ctx.appCaps.get(caller.ins) ?? null);
+      ctx.appCaps.onStatus(caller.ins, body.caps, caller.iat);
+      const capsChanged = capsBefore !== JSON.stringify(ctx.appCaps.get(caller.ins) ?? null);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
       // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)
       const upgradeChanged = JSON.stringify(upgradeFields(prev?.status)) !== JSON.stringify(upgradeFields(body));
-      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged || upgradeChanged) ctx.emit("health");
+      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged || upgradeChanged || capsChanged) ctx.emit("health");
     }
     const wait = Math.min(Math.max(Number(url.searchParams.get("wait") ?? 0) || 0, 0), 60);
     const answer = (): AppStatusResponse | undefined => {
@@ -370,6 +388,8 @@ export class InternalApi {
     if (app.down || !app.manifest) throw new BridgeError("app_unavailable", 503, "the target app is starting; retry");
     const op = app.ops.get(env.op);
     if (!op) throw new BridgeError("unknown_tool", 404);
+    // C373 P1 (BRIDGE §8.6): shape only here; `runGate` binds it to the presented grant's `wfl`
+    const workflow = envelopeWorkflow((env as CallEnvelope & { workflow?: unknown }).workflow);
     // A2A-3: a parentCall must be a call id (format and size) before it is looked up or logged
     if (env.parentCall !== undefined && (typeof env.parentCall !== "string" || !CALL_ID_RE.test(env.parentCall))) {
       throw new BridgeError("parent_call_invalid", 400, "parentCall must be a call id (call_<ULID>)");
@@ -385,16 +405,18 @@ export class InternalApi {
     }
     try {
       const { result } = await this.router.route({
-        caller: { type: "app", ins: caller.ins, grant },
+        caller: { type: "app", ins: caller.ins, grant, ...(workflow !== undefined ? { workflow } : {}) },
         target: { app, op, ...(op.standard || !op.dynamic ? {} : isRecord(env.input) && typeof env.input.tool === "string" ? { tool: env.input.tool } : {}) },
         input: (env.input ?? {}) as Json,
         ...(env.idempotencyKey ? { idempotencyKey: env.idempotencyKey } : {}),
         ...(parentCall ? { parentCall } : {}),
+        // v0.1.77 (C367 P4, BRIDGE §8.5): as sent; `route` validates it against the presented grant's verified product
+        ...(env.context !== undefined ? { callerContext: env.context } : {}),
       });
       sendJson(res, result.status === "held" ? 202 : 200, result);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
-      sendJson(res, e instanceof BridgeError && e.status !== 400 ? e.status : statusFor(code), envelope(code, e instanceof Error ? e.message : code, requestId));
+      sendJson(res, e instanceof BridgeError && e.status !== 400 ? e.status : statusFor(code), envelope(code, e instanceof Error ? e.message : code, requestId, e instanceof BridgeError ? e.details : undefined));
     }
   }
 

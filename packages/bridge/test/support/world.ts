@@ -158,6 +158,8 @@ export interface World {
    * TB-Call proof) and the handler that answers (`[]` when none)
    */
   bridgeOps: { seen: { path: string; body: any; proof: string | undefined }[]; answer?: (path: string, body: any) => unknown; /** answer every bridge op with this HTTP status and no body */ status?: number };
+  /** C373 P1: further fake-Portal routes (after the bridge assertion is verified): every request received, and the handler that answers (404 when none or undefined) */
+  portalRoutes: { seen: { path: string; body: any }[]; answer?: (path: string, body: any) => { status: number; body: unknown } | undefined };
 }
 
 export interface WorldOptions {
@@ -188,6 +190,8 @@ export interface WorldOptions {
    * the per-form defaults).
    */
   formDefaultHosts?: boolean;
+  /** the ManifestApi the BRIDGE runs with, wrapped (the world itself signs with the unwrapped one); e.g. a TEMP verifier that knows a new claim */
+  wrapApi?: (api: ManifestApi) => ManifestApi;
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -216,6 +220,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const appOps: World["appOps"] = {};
   const bridgeOps: World["bridgeOps"] = { seen: [] };
   const viewer: World["viewer"] = { seen: [] };
+  const portalRoutes: World["portalRoutes"] = { seen: [] };
   let down = false;
   let pulls = 0;
   let ackFails = false;
@@ -422,6 +427,15 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       acks.push(JSON.parse(raw.toString("utf8")));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ accepted: true, configRevision: rev }));
     }
+    let extra: unknown;
+    try {
+      extra = raw.length ? JSON.parse(raw.toString("utf8")) : undefined;
+    } catch {
+      extra = undefined;
+    }
+    portalRoutes.seen.push({ path: url.pathname, body: extra });
+    const answer = portalRoutes.answer?.(url.pathname, extra);
+    if (answer) return res.writeHead(answer.status, { "content-type": "application/json" }).end(JSON.stringify(answer.body));
     res.writeHead(404).end();
   });
 
@@ -430,10 +444,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const bridgeEnv = (): NodeJS.ProcessEnv => ({ ...loopback, TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url, ...(opts.extraOwnInfraOrigins ?? [])].join(","), ...opts.env, ...envOverrides });
   const roots = opts.portalRoots ?? (root ? [root.publicJwk] : undefined);
   const rootOpt = roots ? { portalRootKeys: roots } : {};
+  const bridgeApi = opts.wrapApi ? opts.wrapApi(api) : api;
   let bridge: RunningBridge;
   try {
     bridge = await startBridge({
-      api,
+      api: bridgeApi,
       logger: opts.logger ?? silentLogger,
       ports: { public: 0, internal: 0 },
       env: bridgeEnv(),
@@ -503,6 +518,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     appOps,
     bridgeOps,
     viewer,
+    portalRoutes,
     publicRequests: (path) => seen.get(path) ?? 0,
     mcp,
     signPortal: sign,
@@ -579,7 +595,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     async restart() {
       // stop() is idempotent: the bridge may already be stopped (a drain ends with stop)
       await bridge.stop();
-      bridge = await startBridge({ api, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...(opts.form ? { form: opts.form } : {}), ...rootOpt });
+      bridge = await startBridge({ api: bridgeApi, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...(opts.form ? { form: opts.form } : {}), ...rootOpt });
       countRequests(bridge);
       world.bridge = bridge;
     },
