@@ -7,7 +7,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
-import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
+import type { AppStatus, ScopeSourceItem } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { PERSONA_MAX_CHARS, PERSONA_PATTERN } from "@opt2-tealbrick/spec/models";
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
@@ -103,7 +103,8 @@ export class BridgeContext extends EventEmitter {
   readonly health = new Map<InstanceId, AppHealth>();
   /** C268c: which hook apps accept `bd` in the call proof (proof-caps.ts) */
   readonly proofCaps = new ProofCaps();
-  readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
+  /** spec 0.1.65 (C331 D8): `sources` = the app's scope instances of that agent, as cleaned in scope-summary.ts (absent = not reported) */
+  readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string; sources?: ScopeSourceItem[] }>();
   /** when each app instance was last asked for its scope summary (ms), and the request in flight (scope-summary.ts) */
   readonly scopeSummaryAt = new Map<InstanceId, number>();
   readonly scopeSummaryRuns = new Map<InstanceId, Promise<void>>();
