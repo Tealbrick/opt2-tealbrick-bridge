@@ -43,6 +43,24 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
       w.bridgeOps.answer = undefined;
     }
   },
+  // spec 0.1.81 (C373, BRIDGE "hook recipients"): an outward dynamic call whose resolution names places → the before hook sees the
+  // canonical handles of THIS call. Every path and edge case is c373-hook-recipients.test.ts (B33.*)
+  hook_recipients: async (w) => {
+    const app = w.bridge.ctx.table?.apps.get(INS as never);
+    const op = app?.ops.get("notes_list");
+    assert.ok(app && op);
+    const dyn = { ...op, dynamic: { mode: "list", crudCeiling: ["read", "create"], effectCeiling: "outward" } } as never;
+    const from = w.appLog.hooks.length;
+    w.bridgeOps.answer = (path, body) => (path === "resolve" ? { tool: String(body.tool), crud: ["create"], effect: "outward", holdFamily: "outward", recipients: [{ pointer: "/to", kind: "email" }] } : undefined);
+    try {
+      const r = await new CallRouter(w.bridge.ctx).route({ caller: { type: "agent", agt: AGT as never, con: CON as never }, target: { app, op: dyn, tool: "probe_send" }, input: { tool: "probe_send", arguments: { to: "Probe@Example.com" } } as never, idempotencyKey: "caps-probe-recipients" });
+      assert.equal(r.result.status, "ok");
+      const before = w.appLog.hooks.slice(from).find((h) => h.body.phase === "before");
+      assert.deepEqual((before?.body.call as { target?: { recipients?: string[] } } | undefined)?.target?.recipients, ["email:probe@example.com"]);
+    } finally {
+      w.bridgeOps.answer = undefined;
+    }
+  },
   events: async (w) => {
     assert.ok(w.bridge.ctx.events, "the event log is open");
     const r = await fetch(`${w.internalUrl}/tb/v1/events`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [] }) });
@@ -125,17 +143,19 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
 describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
   let w: World;
   before(async () => {
-    w = await makeWorld({ real: true });
+    // spec 0.1.81: with the guard hook app, so the hook_recipients probe sees a before-hook request
+    w = await makeWorld({ real: true, withHook: true });
     await waitFor(() => w.acks.length > 0 && w.bridge.ctx.table?.rev === w.rev(), 15000);
   });
   after(async () => {
     await w.close();
   });
 
-  test("the bridge declares exactly owner_rows, events, model_roles, hook_tool, app_hold_status and app_call_context (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
-    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
+  test("the bridge declares exactly owner_rows, events, model_roles, hook_tool, app_hold_status, app_call_context and hook_recipients (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
+    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "hook_recipients"]);
     assert.equal((BRIDGE_CAPS_DECLARED as readonly string[]).includes("secret_output"), false, "C354: not before the bridge pins a validator that accepts secretOutput");
-    for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
+    // spec 0.1.81: `hook_recipients` is in the spec PR (specs, label 0.1.81), not yet in the pinned spec; TODO(C373 re-pin): drop the skip
+    for (const c of BRIDGE_CAPS_DECLARED) if (c !== "hook_recipients") assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 
   test("every status report carries the caps: the ones Portal received and a freshly built one", async () => {
@@ -143,11 +163,11 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.publish();
     await waitFor(() => w.acks.some((a) => a.rev === w.rev()), 15000);
     assert.ok(w.acks.length >= 2, `reports received: ${w.acks.length}`);
-    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"], `report rev ${a.rev}`);
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
+    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "hook_recipients"], `report rev ${a.rev}`);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "hook_recipients"]);
     // a copy: changing a report never changes what the next one says
     (buildStatusReport(w.bridge.ctx).bridge.caps as string[]).push("x");
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "hook_recipients"]);
   });
 
   test("every declared cap has a probe, and the probe passes (the behaviour the cap names exists in this build)", async () => {
@@ -159,7 +179,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "caps.ts")) {
       const text = readFileSync(`${dir}${f}`, "utf8");
-      assert.ok(!/["'](owner_rows|events|model_roles|hook_tool|app_hold_status|app_call_context|secret_output)["']/.test(text), `${f} must take the caps from caps.ts`);
+      assert.ok(!/["'](owner_rows|events|model_roles|hook_tool|app_hold_status|app_call_context|hook_recipients|secret_output)["']/.test(text), `${f} must take the caps from caps.ts`);
     }
   });
 });
@@ -194,7 +214,7 @@ describe("standalone bridge: slice.bridge.caps from its own set (spec 0.1.54)", 
     await waitFor(() => w.bridge.ctx.table?.standalone === true && w.bridge.ctx.table?.config.iss === w.bridge.ctx.bridgeRef, 15000);
     const slice = w.bridge.ctx.table?.config.apps.find((a) => a.ins === INS)?.slice as string;
     const claims = JSON.parse(Buffer.from(slice.split(".")[1] as string, "base64url").toString("utf8")) as { bridge?: { id?: string; keys?: unknown[]; caps?: string[] } };
-    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
+    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "hook_recipients"]);
     assert.equal(claims.bridge?.id, BRG, "the rest of the bridge member is kept");
     assert.equal(claims.bridge?.keys?.length, 1);
   });

@@ -19,6 +19,7 @@ import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFE
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import { APP_HOLD_STATUS_MIN_SDK, APP_HOLD_STATUS_OP, callerContextKeys, sdkVersionAtLeast } from "./app-calls.ts";
 import type { BridgeContext } from "./context.ts";
+import { hookRecipients } from "./recipients.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
 import { isSecretOutputOp } from "./tools.ts";
 import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
@@ -348,16 +349,18 @@ export class CallRouter {
    * Effective op for gate() and hooks: dynamic ops take crud/effect/holdFamily from resolve, within ceilings, and `tool` =
    * the resolution's canonical tool (spec 0.1.68, hook target `tool`); static ops have no tool.
    */
-  private async effectiveOp(t: Target): Promise<{ op: OperationView; tool?: string }> {
+  private async effectiveOp(t: Target): Promise<{ op: OperationView; tool?: string; recipientPlaces?: unknown }> {
     const op = t.op;
-    if (op.standard || !op.dynamic) return { op };
+    // spec 0.1.81 (C373): `recipients` = recipient places (static op: the manifest's; dynamic op: the cached resolution's), read
+    // structurally until the spec pin types them
+    if (op.standard || !op.dynamic) return { op, recipientPlaces: (op as { recipients?: unknown }).recipients };
     if (!t.tool) throw new BridgeError("input_invalid", 400, "dynamic tool missing");
     const r = await this.resolve(t.app, op.id, t.tool);
     const ceilingIdx = EFFECTS.indexOf(op.dynamic.effectCeiling);
     if (!r.crud.every((c) => op.dynamic?.crudCeiling.includes(c)) || EFFECTS.indexOf(r.effect) > ceilingIdx) {
       throw new BridgeError("dynamic_ceiling_exceeded", 403);
     }
-    return { op: { ...op, crud: r.crud as CrudAction[], effect: r.effect as Effect, ...(r.holdFamily ? { holdFamily: r.holdFamily as HoldFamily } : {}) }, tool: r.tool };
+    return { op: { ...op, crud: r.crud as CrudAction[], effect: r.effect as Effect, ...(r.holdFamily ? { holdFamily: r.holdFamily as HoldFamily } : {}) }, tool: r.tool, recipientPlaces: (r as { recipients?: unknown }).recipients };
   }
 
   private selectGrant(t: Table, caller: Caller, target: InstanceId): string {
@@ -515,7 +518,7 @@ export class CallRouter {
       // spec 0.1.68 (BRIDGE v0.1.68, cap `secret_output`): a secretOutput op answers app callers only; an agent is refused
       // before anything runs (on every path: MCP, relay; the op is never listed for agents either)
       if (caller.type === "agent" && isSecretOutputOp(target.op)) throw new BridgeError("secret_output_app_only", 403, "this operation answers app callers only");
-      const { op, tool: resolvedTool } = await this.effectiveOp(target);
+      const { op, tool: resolvedTool, recipientPlaces } = await this.effectiveOp(target);
       const grant = this.selectGrant(t0, caller, target.app.entry.ins);
       // 4. input against the op schema (dynamic: the fixed DynamicCallInput shape)
       const v = ctx.api.validateInput(target.op, req.input);
@@ -564,6 +567,9 @@ export class CallRouter {
           crud: op.crud,
           effect: op.effect,
           ...(!op.standard && op.holdFamily ? { holdFamily: op.holdFamily } : {}),
+          // spec 0.1.81 (C373, G-6, cap `hook_recipients`): who an outward call talks to, read from THIS input at the op's or the
+          // resolution's places; the same for agent and app callers, every hook phase. Absent = unknown. Never logged.
+          ...hookRecipients(op.effect, recipientPlaces, resolvedTool !== undefined, req.input),
         },
         input: req.input as JsonValue,
       };
