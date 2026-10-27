@@ -22,10 +22,17 @@ import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
 import { isSecretOutputOp } from "./tools.ts";
 import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
+import { WORKFLOW_GATE_VERDICTS, workflowGate } from "./workflow-grants.ts";
 
 export type Caller =
   | { type: "agent"; agt: `agt_${string}`; con: `con_${string}` }
-  | { type: "app"; ins: InstanceId; grant: string };
+  | {
+      type: "app";
+      ins: InstanceId;
+      grant: string;
+      /** C373 P1 (BRIDGE §8.6, cap `app_workflow_grants`): `CallEnvelope.workflow` as sent (shape-checked); the gate binds it to the grant's `wfl` */
+      workflow?: string;
+    };
 
 export interface Target {
   app: AppRuntime;
@@ -84,6 +91,8 @@ const BRIDGE_VERDICTS: ReadonlySet<string> = new Set([
   "not_in_workflow",
   "audience_not_agent",
   "scope_type_unknown",
+  // C373 P1 (BRIDGE §8.6): the workflow-grant gate
+  ...WORKFLOW_GATE_VERDICTS,
 ]);
 const APP_CODE_RULE = /^[a-z][a-z0-9_]{1,40}$/;
 
@@ -117,6 +126,7 @@ const METRIC_CODES: ReadonlySet<string> = new Set([
   "payload_too_large",
   "rate_limited",
   "request_timeout",
+  ...WORKFLOW_GATE_VERDICTS,
 ]);
 
 /** Maps any code to the fixed metric label set (H-5). */
@@ -384,13 +394,16 @@ export class CallRouter {
     if (caller.type === "app") {
       const v = this.ctx.api.verifyGrant(grant, trustFor(t, target.app.entry.ins, now));
       if (!("claims" in v) || v.claims.sub !== insRef(caller.ins)) throw new BridgeError("grant_invalid", 403);
+      // C373 P1 (BRIDGE §8.6 rule 2, right after the subject check): envelope `workflow` ⇔ grant `wfl`; a workflow grant is checked against
+      // the config's withdrawal records, `wflEpoch`, `workflowGrantEdges` and `appsPolicy.held` instead of slice membership
+      const isWorkflowGrant = workflowGate(this.ctx, t, caller.ins, v.claims as CompanionGrantClaims, caller.workflow);
       // v0.1.77 (C367 P3, BRIDGE §8.3, cap `app_hold_status`): gate() lets `tb.hold_status` pass on any valid grant (I4 skips the
       // CRUD ceiling and the workflow step), which is right for an agent. An APP caller needs the op in its companion grant's `wf`
       // (MANIFEST M-CP-3 mints it there): not listed → `not_in_workflow`, like any op outside `wf`. Never for another standard op.
       if (op.standard && op.id === APP_HOLD_STATUS_OP && !(v.claims.wf as readonly string[]).includes(APP_HOLD_STATUS_OP)) throw new BridgeError("not_in_workflow", 403);
       // C70: a valid grant that is not in the caller's CURRENT slice was minted under an older revision → the SDK
       // re-reads its slice once and retries (grant_expired stays the code for exp)
-      const current = sliceGrants(t.apps.get(caller.ins));
+      const current = isWorkflowGrant ? undefined : sliceGrants(t.apps.get(caller.ins));
       if (current && !current.includes(grant)) throw new BridgeError("grant_stale", 403, "the grant is from an older slice revision; re-read the slice");
       return (v.claims as CompanionGrantClaims).prd;
     }
@@ -552,7 +565,8 @@ export class CallRouter {
           caller.type === "agent"
             ? { type: "agent" as const, id: caller.agt, ...(t0.agents.get(caller.agt) ? { mode: t0.agents.get(caller.agt)?.mode } : {}) }
             : // never from input, a header or a manifest name; an instance the table cannot map carries none (see above)
-              { type: "app" as const, id: caller.ins, ...(callerProduct ? { product: callerProduct } : {}) },
+              // C373 P1: `workflow` = the grant's verified `wfl` (runGate refused any envelope workflow that differs from it)
+              { type: "app" as const, id: caller.ins, ...(callerProduct ? { product: callerProduct } : {}), ...(caller.workflow ? { workflow: caller.workflow } : {}) },
         target: {
           instance: target.app.entry.ins,
           product: target.app.entry.product,
@@ -647,7 +661,7 @@ export class CallRouter {
       this.count(`call|${target.app.entry.product}|${metricCode(code)}`);
       ctx.log.info(caller.type === "app" && !req.parentCall ? "call.app_initiated" : "bridge.call", {
         call,
-        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins, parentCall: req.parentCall ?? null }),
+        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins, parentCall: req.parentCall ?? null, ...(caller.workflow ? { wfl: caller.workflow } : {}) }),
         product: target.app.entry.product,
         op: target.op.id,
         decision: code === "ok" ? "forwarded" : "refused",
