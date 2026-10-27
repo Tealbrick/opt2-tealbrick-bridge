@@ -14,6 +14,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { BRIDGE_CAPS } from "@opt2-tealbrick/spec/bridge";
+import { APP_HOLD_STATUS_MIN_SDK } from "../src/app-calls.ts";
 import { CallRouter } from "../src/calls.ts";
 import { BRIDGE_CAPS_DECLARED } from "../src/caps.ts";
 import { buildStatusReport } from "../src/portal.ts";
@@ -65,6 +66,41 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
     const page = await fetch(`${w.keysUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }) });
     assert.match(await page.text(), /<h1 id="h">Keys and models<\/h1>[\s\S]*Provider keys/);
   },
+  // spec 0.1.77 (BRIDGE v0.1.77 §8.3, C367 P3): tb.hold_status for an APP caller needs the op in the companion grant's wf and a target
+  // that reports an sdkVersion >= APP_HOLD_STATUS_MIN_SDK; otherwise not_in_workflow. The full behaviour is c367-app-hold-status-context.test.ts
+  app_hold_status: async (w) => {
+    const t = w.bridge.ctx.table;
+    const app = t?.apps.get(INS as never);
+    const op = app?.ops.get("tb.hold_status");
+    assert.ok(t && app && op);
+    const grantWith = (wf: string[]) => w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:ins:${INS}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 3600, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: ["read"], mode: "bound", held: [], caps: {}, wf, polrev: 1, prd: "notes" });
+    const call = async (wf: string[]) => new CallRouter(w.bridge.ctx).route({ caller: { type: "app", ins: INS as never, grant: await grantWith(wf) }, target: { app, op }, input: { holdId: "hold_1" } });
+    const refused = (e: unknown) => (e as { code?: string }).code === "not_in_workflow";
+    try {
+      w.bridge.ctx.health.delete(INS as never);
+      await assert.rejects(call(["tb.hold_status"]), refused, "an unknown sdkVersion is refused");
+      w.bridge.ctx.health.set(INS as never, { status: { sdkVersion: APP_HOLD_STATUS_MIN_SDK, version: app.entry.version } as never, lastSeen: now() }); // QA-BR29-1: a push of the named version
+      await assert.rejects(call(["notes_list"]), refused, "not in wf");
+      assert.equal((await call(["tb.hold_status"])).result.status, "ok");
+    } finally {
+      w.bridge.ctx.health.delete(INS as never);
+    }
+  },
+  // spec 0.1.77 (BRIDGE v0.1.77 §8.5, C367 P4): a companion context is checked against the grant's prd, merged into the op body
+  // `context`, and refused 400 input_invalid when it breaks a rule. The full behaviour is c367-app-hold-status-context.test.ts
+  app_call_context: async (w) => {
+    const t = w.bridge.ctx.table;
+    const app = t?.apps.get(INS as never);
+    const op = app?.ops.get("notes_list");
+    assert.ok(t && app && op);
+    const grant = await w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:ins:${INS}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 3600, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: ["read"], mode: "bound", held: [], caps: {}, wf: ["notes_list"], polrev: 1, prd: "notes" });
+    const call = (callerContext: unknown) => new CallRouter(w.bridge.ctx).route({ caller: { type: "app", ins: INS as never, grant }, target: { app, op }, input: {}, callerContext });
+    const before = w.appLog.ops.length;
+    await call({ "notes.run": "run_1" });
+    assert.deepEqual(w.appLog.ops[before]?.body.context, { "notes.run": "run_1" });
+    await assert.rejects(call({ "kanban.card": 1 }), (e: unknown) => (e as { code?: string; details?: { pointer?: string } }).code === "input_invalid" && (e as { details?: { pointer?: string } }).details?.pointer === "/context/kanban.card");
+    assert.equal(w.appLog.ops.length, before + 1, "the refused call was not forwarded");
+  },
   owner_rows: async (w) => {
     const t = w.bridge.ctx.table;
     const app = t?.apps.get(INS as never);
@@ -96,12 +132,10 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.close();
   });
 
-  test("the bridge declares exactly owner_rows, events, model_roles and hook_tool (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
-    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool"]);
-    // spec 0.1.68 adds hook_tool to BRIDGE_CAPS; the pinned spec predates it (drop this list at the re-pin)
+  test("the bridge declares exactly owner_rows, events, model_roles, hook_tool, app_hold_status and app_call_context (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
+    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
     assert.equal((BRIDGE_CAPS_DECLARED as readonly string[]).includes("secret_output"), false, "C354: not before the bridge pins a validator that accepts secretOutput");
-    const SPEC_0_1_68 = ["hook_tool"];
-    for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c) || SPEC_0_1_68.includes(c), `${c} is in the spec BRIDGE_CAPS`);
+    for (const c of BRIDGE_CAPS_DECLARED) assert.ok((BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 
   test("every status report carries the caps: the ones Portal received and a freshly built one", async () => {
@@ -109,11 +143,11 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.publish();
     await waitFor(() => w.acks.some((a) => a.rev === w.rev()), 15000);
     assert.ok(w.acks.length >= 2, `reports received: ${w.acks.length}`);
-    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool"], `report rev ${a.rev}`);
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool"]);
+    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"], `report rev ${a.rev}`);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
     // a copy: changing a report never changes what the next one says
     (buildStatusReport(w.bridge.ctx).bridge.caps as string[]).push("x");
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool"]);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
   });
 
   test("every declared cap has a probe, and the probe passes (the behaviour the cap names exists in this build)", async () => {
@@ -125,7 +159,7 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "caps.ts")) {
       const text = readFileSync(`${dir}${f}`, "utf8");
-      assert.ok(!/["'](owner_rows|events|model_roles|hook_tool|secret_output)["']/.test(text), `${f} must take the caps from caps.ts`);
+      assert.ok(!/["'](owner_rows|events|model_roles|hook_tool|app_hold_status|app_call_context|secret_output)["']/.test(text), `${f} must take the caps from caps.ts`);
     }
   });
 });
@@ -160,7 +194,7 @@ describe("standalone bridge: slice.bridge.caps from its own set (spec 0.1.54)", 
     await waitFor(() => w.bridge.ctx.table?.standalone === true && w.bridge.ctx.table?.config.iss === w.bridge.ctx.bridgeRef, 15000);
     const slice = w.bridge.ctx.table?.config.apps.find((a) => a.ins === INS)?.slice as string;
     const claims = JSON.parse(Buffer.from(slice.split(".")[1] as string, "base64url").toString("utf8")) as { bridge?: { id?: string; keys?: unknown[]; caps?: string[] } };
-    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool"]);
+    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"]);
     assert.equal(claims.bridge?.id, BRG, "the rest of the bridge member is kept");
     assert.equal(claims.bridge?.keys?.length, 1);
   });

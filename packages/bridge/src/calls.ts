@@ -17,6 +17,7 @@ import type {
 import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
+import { APP_HOLD_STATUS_MIN_SDK, APP_HOLD_STATUS_OP, callerContextKeys, sdkVersionAtLeast } from "./app-calls.ts";
 import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
 import { isSecretOutputOp } from "./tools.ts";
@@ -42,6 +43,12 @@ export interface CallRequest {
   signal?: AbortSignal;
   /** bridge-written `tb.*` context (BRIDGE §8.5), set BEFORE the before hooks; e.g. `tb.onBehalfOf` */
   reservedContext?: JsonObject;
+  /**
+   * v0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): `CallEnvelope.context` exactly as the app caller sent it (`undefined` =
+   * absent). Companion path only; `route` validates it against the VERIFIED product of the presented grant, after the grant is
+   * selected and before any hook, and merges the keys into the op body `context`.
+   */
+  callerContext?: unknown;
 }
 
 export type CallOutcome = OpResult<JsonValue>;
@@ -146,7 +153,15 @@ export const PARENT_CALL_TTL_MS = 120_000;
 /** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
 class HookBadAnswer extends Error {}
 
+/**
+ * Does a hook's `match` cover this call? MANIFEST §16 (Hooks): hooks match only `agent`-audience manifest operations reached through
+ * the bridge, never the standard `tb.*` ops, person ops or hook calls (Rules F2). So a standard op, or any op whose audience is not
+ * `agent`, never matches (not even a `products: ["*"]` hook with no `operations`): a hook outage must not fail `tb.holds_*`,
+ * `tb.hold_status` or `tb.receipts_list` closed. Used by the call path (`matchingHooks`, `requireListedHooks`) and by rule 6 of
+ * the event summaries (`eventHookMatches`). Hook calls themselves never route through here (`callHook` is not a call).
+ */
 function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Pick<Target, "app">, op: OperationView): boolean {
+  if (op.standard || op.audience !== "agent") return false;
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
 }
 
@@ -185,8 +200,10 @@ export class CallRouter {
     this.shutdown.abort();
     return this.active.size;
   }
-  private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
+  private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution; digest: string }>();
   private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
+  /** QA-P5-3: instance → the release digest its cached resolutions came from */
+  private readonly resolvedDigest = new Map<string, string>();
   readonly counters = new Map<string, number>();
 
   constructor(ctx: BridgeContext) {
@@ -198,6 +215,14 @@ export class CallRouter {
       // an instance that left the table never answers again: its cached catalogs go (review: the cache is pruned)
       const live = new Set([...(next?.apps.values() ?? [])].map((a) => String(a.entry.ins)));
       for (const key of this.catalogCache.keys()) if (!live.has(key.slice(0, key.indexOf("|")))) this.catalogCache.delete(key);
+      // QA-P5-3: a resolution belongs to the release that answered it; an instance that left or now runs another release
+      // (digest changed: update, rollback, candidate) resolves again, so a reclassified tool never keeps its old crud/effect
+      const running = new Map([...(next?.apps.values() ?? [])].map((a) => [String(a.entry.ins), String(a.digest ?? a.entry.manifestDigest)]));
+      for (const [ins, digest] of this.resolvedDigest) {
+        if (running.get(ins) === digest) continue;
+        this.resolvedDigest.delete(ins);
+        for (const key of this.resolveCache.keys()) if (key.startsWith(`${ins}|`)) this.resolveCache.delete(key);
+      }
     });
     // C283 A1: `admitted` marks follow the app's owner rows, which changed
     ctx.on("scopes", () => this.expireCatalogs());
@@ -310,7 +335,8 @@ export class CallRouter {
   private async resolve(app: AppRuntime, op: string, tool: string): Promise<DynamicResolution> {
     const key = `${app.entry.ins}|${op}|${tool}`;
     const hit = this.resolveCache.get(key);
-    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.value;
+    // QA-BR29-3: a hit counts only for the release that runs now (a resolve in flight across a table swap keeps the old digest)
+    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS && hit.digest === String(app.digest ?? app.entry.manifestDigest)) return hit.value;
     let value: DynamicResolution;
     try {
       value = await this.bridgeOp<DynamicResolution>(app, "resolve", { op, tool });
@@ -333,7 +359,8 @@ export class CallRouter {
       throw new BridgeError("dynamic_resolve_failed", 403, "the app's resolution names a different or malformed tool", { reason: "tool_mismatch" });
     }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
-    this.resolveCache.set(key, { at: Date.now(), value });
+    this.resolveCache.set(key, { at: Date.now(), value, digest: String(app.digest ?? app.entry.manifestDigest) });
+    this.resolvedDigest.set(String(app.entry.ins), String(app.digest ?? app.entry.manifestDigest));
     return value;
   }
 
@@ -377,6 +404,10 @@ export class CallRouter {
     if (caller.type === "app") {
       const v = this.ctx.api.verifyGrant(grant, trustFor(t, target.app.entry.ins, now));
       if (!("claims" in v) || v.claims.sub !== insRef(caller.ins)) throw new BridgeError("grant_invalid", 403);
+      // v0.1.77 (C367 P3, BRIDGE §8.3, cap `app_hold_status`): gate() lets `tb.hold_status` pass on any valid grant (I4 skips the
+      // CRUD ceiling and the workflow step), which is right for an agent. An APP caller needs the op in its companion grant's `wf`
+      // (MANIFEST M-CP-3 mints it there): not listed → `not_in_workflow`, like any op outside `wf`. Never for another standard op.
+      if (op.standard && op.id === APP_HOLD_STATUS_OP && !(v.claims.wf as readonly string[]).includes(APP_HOLD_STATUS_OP)) throw new BridgeError("not_in_workflow", 403);
       // C70: a valid grant that is not in the caller's CURRENT slice was minted under an older revision → the SDK
       // re-reads its slice once and retries (grant_expired stays the code for exp)
       const current = sliceGrants(t.apps.get(caller.ins));
@@ -514,6 +545,24 @@ export class CallRouter {
       }
       // 5. gate
       const grantPrd = this.runGate(t0, caller, target, op, grant);
+      // v0.1.77 (C367 P3, BRIDGE §8.3, PK-D6): the ownership rule of `tb.hold_status` lives in the target's SDK, so an APP caller
+      // reaches it only on a target whose last reported `sdkVersion` (the status push) is at least APP_HOLD_STATUS_MIN_SDK. Lower,
+      // unknown or malformed → refused here, before any hook; the target is not called. Agent calls are unchanged.
+      // QA-BR29-1: the status counts only when it was pushed by the version the config names now (serving or update candidate),
+      // so a rollback to an older SDK is not trusted on the last push of the newer one.
+      const pushed = ctx.health.get(target.app.entry.ins)?.status;
+      const named = [target.app.entry.version, target.app.entry.candidateVersion].filter((v) => typeof v === "string");
+      if (caller.type === "app" && op.standard && op.id === APP_HOLD_STATUS_OP && (!pushed || !named.includes(pushed.version) || !sdkVersionAtLeast(pushed.sdkVersion, APP_HOLD_STATUS_MIN_SDK))) {
+        throw new BridgeError("not_in_workflow", 403, "the target app does not answer hold status for app callers yet");
+      }
+      // v0.1.77 (C367 P4, BRIDGE §8.5, cap `app_call_context`): the caller context, checked against the VERIFIED product of the
+      // presented grant (its `prd`; never the envelope, never the instance table), after the grant is selected and before any hook.
+      // Absent or `{}` = none. Informational only: nothing below (gate, grant checks, hook authority) reads it.
+      // QA-BR29-2: when the grant's `prd` and the instance table disagree (see below), no product is verified: a non-empty
+      // context is then refused like a caller without a verified product (PK-D3).
+      const tableProductForContext = caller.type === "app" ? t0.apps.get(caller.ins)?.entry.product : undefined;
+      const verifiedPrd = grantPrd !== undefined && grantPrd === tableProductForContext ? grantPrd : null;
+      const callerKeys = caller.type === "app" ? callerContextKeys(req.callerContext, verifiedPrd) : undefined;
       // HOOK-CALLER-PRODUCT + GRANT-PRD (spec 0.1.46): the product of an app caller comes from the bridge's own signed
       // config (the instance table). When the presented companion grant also carries `prd` and it differs, the two
       // sources disagree: the hook request carries NO product (a policy app then treats the caller as unverified) and the
@@ -546,7 +595,10 @@ export class CallRouter {
         },
         input: req.input as JsonValue,
       };
-      let context: JsonObject = { ...(req.reservedContext ?? {}) };
+      // the caller's keys first (v0.1.77, §8.5), then the bridge's reserved `tb.*` keys: the two sets never overlap (a caller key
+      // is `<product>.…` and `tb.` is refused), the order only states who owns a collision. Hooks and the app see both, and the
+      // op proof's `ctx` digest covers them.
+      let context: JsonObject = { ...(callerKeys ?? {}), ...(req.reservedContext ?? {}) };
       // 6. before hooks (fail closed). v0.1.13: answers allow | refuse | hold, shape-checked and reduced by the shared
       // rule (manifest hookResponseProblem + reduceBeforeChain): the first refuse stops the chain at once; else the
       // FIRST hold is kept and the remaining hooks still run (a later refuse wins). Runs for every call, a retry

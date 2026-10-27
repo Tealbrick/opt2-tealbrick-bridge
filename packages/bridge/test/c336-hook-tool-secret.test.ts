@@ -208,6 +208,35 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
     resolveAs = (t) => t;
   });
 
+  test("QA-P5-3: a cached resolution is dropped when its instance runs another release (digest change) or leaves the table; an unchanged table keeps it", async () => {
+    const router = new CallRouter(w.bridge.ctx) as unknown as { resolve(app: unknown, op: string, tool: string): Promise<{ tool: string }> };
+    resolveAs = (t) => t;
+    const asks = () => w.bridgeOps.seen.filter((x) => x.path === "resolve" && x.body?.tool === "rc_tool").length;
+    const t0 = w.bridge.ctx.table;
+    assert.ok(t0);
+    const n0 = asks();
+    await router.resolve(app(), "notes_tools", "rc_tool");
+    await router.resolve(app(), "notes_tools", "rc_tool");
+    assert.equal(asks(), n0 + 1, "the second resolve is a cache hit");
+    // the same table again (a config change that does not touch this instance): still cached
+    w.bridge.ctx.emit("table", t0, t0);
+    await router.resolve(app(), "notes_tools", "rc_tool");
+    assert.equal(asks(), n0 + 1, "an unchanged release keeps the cache");
+    // the instance now runs another release: the next resolve asks the app again
+    const a0 = app();
+    const moved = { ...t0, apps: new Map([...t0.apps].map(([k, v]) => [k, k === a0.entry.ins ? { ...v, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000" } : v])) };
+    w.bridge.ctx.emit("table", moved as never, t0);
+    w.bridge.ctx.emit("table", t0, moved as never);
+    await router.resolve(app(), "notes_tools", "rc_tool");
+    assert.equal(asks(), n0 + 2, "a digest change drops the cached resolution");
+    // the instance leaves the table: dropped as well
+    const gone = { ...t0, apps: new Map([...t0.apps].filter(([k]) => k !== a0.entry.ins)) };
+    w.bridge.ctx.emit("table", gone as never, t0);
+    w.bridge.ctx.emit("table", t0, gone as never);
+    await router.resolve(app(), "notes_tools", "rc_tool");
+    assert.equal(asks(), n0 + 3, "an instance that left resolves again");
+  });
+
   test("B29.hook_tool_bypass: case, space and alias variants of a tool the app maps to its canonical name are refused, never run as it", async () => {
     // an app that canonicalises spellings (case-folds, trims, maps an alias) answers the canonical name: the bridge refuses
     resolveAs = (t) => (t.trim().toLowerCase() === "send" ? "gb_send" : t.trim().toLowerCase());
