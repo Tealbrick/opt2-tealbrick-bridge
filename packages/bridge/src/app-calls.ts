@@ -15,7 +15,7 @@ export const APP_HOLD_STATUS_OP = "tb.hold_status";
  * only for the holds that caller raised). The bridge routes `tb.hold_status` for an APP caller only to a target whose last reported
  * `sdkVersion` is at least this; a lower or unknown one is refused `not_in_workflow` and the target is not called.
  */
-// reservation; set to the released miniapp-sdk that ships SDK-API §4.7 (C367) at merge
+// the first released miniapp-sdk that ships SDK-API §4.7 (C367): miniapp-sdk 0.1.41
 export const APP_HOLD_STATUS_MIN_SDK = "0.1.41";
 
 /** `major.minor.patch` with an optional `-prerelease` / `+build` tail; anything else is not a version. */

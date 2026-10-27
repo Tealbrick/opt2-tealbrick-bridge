@@ -163,7 +163,15 @@ export const PARENT_CALL_TTL_MS = 120_000;
 /** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
 class HookBadAnswer extends Error {}
 
+/**
+ * Does a hook's `match` cover this call? MANIFEST §16 (Hooks): hooks match only `agent`-audience manifest operations reached through
+ * the bridge, never the standard `tb.*` ops, person ops or hook calls (Rules F2). So a standard op, or any op whose audience is not
+ * `agent`, never matches (not even a `products: ["*"]` hook with no `operations`): a hook outage must not fail `tb.holds_*`,
+ * `tb.hold_status` or `tb.receipts_list` closed. Used by the call path (`matchingHooks`, `requireListedHooks`) and by rule 6 of
+ * the event summaries (`eventHookMatches`). Hook calls themselves never route through here (`callHook` is not a call).
+ */
 function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Pick<Target, "app">, op: OperationView): boolean {
+  if (op.standard || op.audience !== "agent") return false;
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
 }
 
@@ -204,6 +212,8 @@ export class CallRouter {
   }
   private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
   private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
+  /** QA-P5-3: instance → the release digest its cached resolutions came from */
+  private readonly resolvedDigest = new Map<string, string>();
   readonly counters = new Map<string, number>();
 
   constructor(ctx: BridgeContext) {
@@ -215,6 +225,14 @@ export class CallRouter {
       // an instance that left the table never answers again: its cached catalogs go (review: the cache is pruned)
       const live = new Set([...(next?.apps.values() ?? [])].map((a) => String(a.entry.ins)));
       for (const key of this.catalogCache.keys()) if (!live.has(key.slice(0, key.indexOf("|")))) this.catalogCache.delete(key);
+      // QA-P5-3: a resolution belongs to the release that answered it; an instance that left or now runs another release
+      // (digest changed: update, rollback, candidate) resolves again, so a reclassified tool never keeps its old crud/effect
+      const running = new Map([...(next?.apps.values() ?? [])].map((a) => [String(a.entry.ins), String(a.digest ?? a.entry.manifestDigest)]));
+      for (const [ins, digest] of this.resolvedDigest) {
+        if (running.get(ins) === digest) continue;
+        this.resolvedDigest.delete(ins);
+        for (const key of this.resolveCache.keys()) if (key.startsWith(`${ins}|`)) this.resolveCache.delete(key);
+      }
     });
     // C283 A1: `admitted` marks follow the app's owner rows, which changed
     ctx.on("scopes", () => this.expireCatalogs());
@@ -351,6 +369,7 @@ export class CallRouter {
     }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
     this.resolveCache.set(key, { at: Date.now(), value });
+    this.resolvedDigest.set(String(app.entry.ins), String(app.digest ?? app.entry.manifestDigest));
     return value;
   }
 

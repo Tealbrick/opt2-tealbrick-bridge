@@ -374,6 +374,128 @@ export async function probeViews(ctx: BridgeContext): Promise<boolean> {
 /** con → epoch s of the status report that first carried it (memory; re-reported after restart). */
 const reportedAtS = new Map<string, number>();
 
+/** Core reads an ack body up to 256 KiB; the bridge keeps its report below this (QA bridge#26 S2: one app pushed 443 KB). */
+export const STATUS_REPORT_MAX_BYTES = 240 * 1024;
+/** per app, after the first cuts: at most this many omitted tools and scope summaries are reported */
+export const REPORT_PER_APP_MAX = 50;
+/** QA-BR26D-3: the last cut keeps this many of the newest `connectionsSeen` (the field allows 500) */
+export const REPORT_CONNECTIONS_SEEN_MAX = 100;
+/** QA bridge#26 round 2: an app's `attention.reason` is shortened to this many code points when the report is too large */
+export const REPORT_ATTENTION_MAX = 500;
+
+const jsonBytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");
+type ReportApp = StatusReport["apps"][number];
+type ReportRejected = StatusReport["rejected"][number];
+type ScopeRow = StatusReport["scopeSummaries"][number] & { sources?: unknown[] };
+
+/**
+ * Keeps a status report under STATUS_REPORT_MAX_BYTES. Only what apps can grow is cut, cheapest display data first and always
+ * from the app that grew most first: (1) `sources` of the scope summaries, app by app (heaviest first); (2) `attention.reason`
+ * shortened to REPORT_ATTENTION_MAX code points, app by app; (3) omitted tools, then scope summaries, to REPORT_PER_APP_MAX per
+ * app; (4) all omitted tools, then all scope summaries; (5) `attention` itself. Each cut adds one marker per app in `rejected`
+ * (kind `bridge_op`, code `report_truncated_sources` | `_attention` | `_tools` | `_scopes`, count = items cut), so Core and the
+ * owner see that the report is incomplete. There is ONE marker per (code, app): a later stage that cuts more of the same kind for
+ * the same app adds to its count (attention counts the app once, however many stages hit it). Last, for fields apps cannot grow
+ * but whose total can still pass the cap with many apps (QA-BR26D-3): (6) `connectionsSeen` to the newest
+ * REPORT_CONNECTIONS_SEEN_MAX (marker `report_truncated_connections`, no `ins`), then (7) the detail of `roles[]` rows, app by app:
+ * `provider`, `model`, `dataPolicy` become `null` and `policyBasis` is removed (marker `report_truncated_roles`, count = rows
+ * reduced); `role`, `ins`, `set`, `policyOk` are required by the spec and stay. apps, keys, claims, rejected and bridge.caps are
+ * never cut (a report whose floor alone is over the cap stays over; the cap has 16 KiB slack in Core). A report already small enough is returned unchanged (the same object).
+ */
+export function boundStatusReport(report: StatusReport, maxBytes = STATUS_REPORT_MAX_BYTES): StatusReport {
+  let r = report;
+  const fits = () => jsonBytes(r) <= maxBytes;
+  if (fits()) return r;
+  // one marker per (code, app): the first cut appends it, a later cut of the same kind replaces its count (sum, or max for one item)
+  const added = new Set<string>();
+  const mark = (code: string, ins: string | undefined, count: number, how: "sum" | "max" = "sum") => {
+    if (count <= 0) return;
+    const key = `${code}|${ins ?? ""}`;
+    const same = (x: ReportRejected) => x.kind === "bridge_op" && x.code === code && x.ins === ins;
+    if (!added.has(key)) {
+      added.add(key);
+      r = { ...r, rejected: [...r.rejected, { kind: "bridge_op", code, count, ...(ins === undefined ? {} : { ins: ins as never }) }] };
+      return;
+    }
+    const idx = r.rejected.findLastIndex(same);
+    const prev = r.rejected[idx]?.count ?? 0;
+    r = { ...r, rejected: r.rejected.map((x, i) => (i === idx ? { ...x, count: how === "max" ? Math.max(prev, count) : prev + count } : x)) };
+  };
+  const heaviest = (weights: Map<string, number>) => [...weights.entries()].filter(([, w]) => w > 0).sort((a, b) => b[1] - a[1]);
+  // (1) sources, from the app with the most bytes of them
+  const sourceBytes = new Map<string, number>();
+  for (const s of r.scopeSummaries as ScopeRow[]) if (s.sources?.length) sourceBytes.set(s.ins, (sourceBytes.get(s.ins) ?? 0) + jsonBytes(s.sources));
+  for (const [ins] of heaviest(sourceBytes)) {
+    const rows = r.scopeSummaries as ScopeRow[];
+    const cut = rows.filter((s) => s.ins === ins && s.sources?.length).length;
+    r = { ...r, scopeSummaries: rows.map((s) => (s.ins === ins ? (({ sources: _x, ...rest }: ScopeRow) => rest)(s) : s)) };
+    mark("report_truncated_sources", ins, cut);
+    if (fits()) return r;
+  }
+  // (2) attention reasons, from the longest
+  const attentionBytes = new Map<string, number>(r.apps.filter((a) => a.attention).map((a) => [a.ins, jsonBytes(a.attention)]));
+  for (const [ins] of heaviest(attentionBytes)) {
+    const app = r.apps.find((a) => a.ins === ins);
+    const reason = (app?.attention as { reason?: unknown } | undefined)?.reason;
+    if (!app?.attention || typeof reason !== "string" || Array.from(reason).length <= REPORT_ATTENTION_MAX) continue;
+    const short = Array.from(reason.toWellFormed()).slice(0, REPORT_ATTENTION_MAX).join("");
+    r = { ...r, apps: r.apps.map((a): ReportApp => (a.ins === ins ? { ...a, attention: { ...(a.attention as object), reason: short } as ReportApp["attention"] } : a)) };
+    mark("report_truncated_attention", ins, 1, "max");
+    if (fits()) return r;
+  }
+  // (3) per app caps
+  const capPerApp = <T extends { ins: string }>(items: T[], code: string): T[] => {
+    const seen = new Map<string, number>();
+    const kept = items.filter((i) => {
+      const n = (seen.get(i.ins) ?? 0) + 1;
+      seen.set(i.ins, n);
+      return n <= REPORT_PER_APP_MAX;
+    });
+    for (const [ins, n] of seen) mark(code, ins, n - REPORT_PER_APP_MAX);
+    return kept;
+  };
+  // capPerApp adds markers to `r`: take the kept list first, then build on the updated `r`
+  const keptTools = capPerApp(r.toolsOmitted, "report_truncated_tools");
+  r = { ...r, toolsOmitted: keptTools };
+  if (fits()) return r;
+  const keptScopes = capPerApp(r.scopeSummaries, "report_truncated_scopes");
+  r = { ...r, scopeSummaries: keptScopes };
+  if (fits()) return r;
+  // (4) the lists whole
+  const countBy = (items: { ins: string }[]) => items.reduce((m, i) => m.set(i.ins, (m.get(i.ins) ?? 0) + 1), new Map<string, number>());
+  for (const [ins, n] of countBy(r.toolsOmitted)) mark("report_truncated_tools", ins, n);
+  r = { ...r, toolsOmitted: [] };
+  if (fits()) return r;
+  for (const [ins, n] of countBy(r.scopeSummaries)) mark("report_truncated_scopes", ins, n);
+  r = { ...r, scopeSummaries: [] };
+  if (fits()) return r;
+  // (5) attention itself
+  for (const a of r.apps) if (a.attention) mark("report_truncated_attention", a.ins, 1, "max");
+  r = { ...r, apps: r.apps.map(({ attention: _a, ...a }) => a as ReportApp) };
+  if (fits()) return r;
+  // (6) connectionsSeen: the newest REPORT_CONNECTIONS_SEEN_MAX (the bridge lists them oldest first)
+  const seen = r.connectionsSeen ?? [];
+  if (seen.length > REPORT_CONNECTIONS_SEEN_MAX) {
+    r = { ...r, connectionsSeen: seen.slice(-REPORT_CONNECTIONS_SEEN_MAX) };
+    mark("report_truncated_connections", undefined, seen.length - REPORT_CONNECTIONS_SEEN_MAX);
+    if (fits()) return r;
+  }
+  // (7) role detail, app by app (heaviest first); only the optional / nullable members go
+  type Role = NonNullable<StatusReport["roles"]>[number];
+  const slim = (x: Role): Role => ({ role: x.role, ins: x.ins, set: x.set, policyOk: x.policyOk, provider: null, model: null, dataPolicy: null });
+  const detailed = (x: Role) => x.provider !== null || x.model !== null || x.dataPolicy !== null || x.policyBasis !== undefined;
+  const roleBytes = new Map<string, number>();
+  for (const x of r.roles ?? []) if (detailed(x)) roleBytes.set(x.ins, (roleBytes.get(x.ins) ?? 0) + jsonBytes(x));
+  for (const [ins] of heaviest(roleBytes)) {
+    const rows = r.roles ?? [];
+    const cut = rows.filter((x) => x.ins === ins && detailed(x)).length;
+    r = { ...r, roles: rows.map((x) => (x.ins === ins ? slim(x) : x)) };
+    mark("report_truncated_roles", ins, cut);
+    if (fits()) return r;
+  }
+  return r;
+}
+
 /** BRIDGE §5.6. */
 export function buildStatusReport(ctx: BridgeContext): StatusReport {
   const t = ctx.table;
@@ -424,7 +546,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       if (!reportedAtS.has(r.con)) reportedAtS.set(r.con, now);
       return { con: r.con, agt: r.agt, method: "pairing" as const, clientName: r.clientName, createdAt: new Date(r.createdAt * 1000).toISOString(), pairingJti: ctx.state.reports.pairingJtis[r.con] ?? "" };
     });
-  return {
+  return boundStatusReport({
     rev: t?.rev ?? 0,
     appliedAt: new Date().toISOString(),
     // spec 0.1.54 (C292): the capabilities this build implements, in EVERY report (caps.ts: only with the code they name)
@@ -448,7 +570,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     toolsOmitted: [...ctx.toolsOmitted.values()],
     // spec 0.1.43 (LA-1): only when the workspace has a views service (TB_VIEWS_PUBLIC_URL); a probe has not run yet → not ok
     ...(ctx.viewsUrl ? { views: { url: ctx.viewsUrl, ok: ctx.views?.ok ?? false, lastCheckAt: ctx.views?.lastCheckAt ?? new Date(0).toISOString() } } : {}),
-  };
+  });
 }
 
 
