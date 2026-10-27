@@ -79,7 +79,7 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
     try {
       w.bridge.ctx.health.delete(INS as never);
       await assert.rejects(call(["tb.hold_status"]), refused, "an unknown sdkVersion is refused");
-      w.bridge.ctx.health.set(INS as never, { status: { sdkVersion: APP_HOLD_STATUS_MIN_SDK } as never, lastSeen: now() });
+      w.bridge.ctx.health.set(INS as never, { status: { sdkVersion: APP_HOLD_STATUS_MIN_SDK, version: app.entry.version } as never, lastSeen: now() }); // QA-BR29-1: a push of the named version
       await assert.rejects(call(["notes_list"]), refused, "not in wf");
       assert.equal((await call(["tb.hold_status"])).result.status, "ok");
     } finally {
