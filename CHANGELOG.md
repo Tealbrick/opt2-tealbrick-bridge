@@ -2,6 +2,11 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.12 — manifest 0.1.35 (Governance 0.3.1 `needsTopology`, C373 G-2)
+
+- Pins `@opt2-tealbrick/manifest` 0.1.35 (also the relay override). Manifest 0.1.32 refused the top-level `needsTopology` (additional property), so the bridge refused Governance 0.3.1's manifest (`schema_invalid`) and Core rolled the update back on DEV (qa1, 2026-10-28). Manifest 0.1.35 accepts it with `needsAgentDirectory` (M-TP-1). Spec stays 0.1.78. No code change; upgradeFrom unchanged (>=0.1.31).
+- Order: this bridge before Governance 0.3.1 in every workspace (ostra included).
+
 ## 0.2.11 — app hold status and caller context; scope sources in the status report (bridge#26, C331 D8); caps `app_hold_status`, `app_call_context` (C367 P3, P4; spec 0.1.77)
 
 - **`tb.hold_status` for an app caller (BRIDGE §8.3 v0.1.77, cap `app_hold_status`).** On the companion path the standard op is routed when the presented grant's `wf` lists it (`runGate`; MANIFEST M-CP-3 mints it there). `gate()` already skips the CRUD ceiling and the workflow step for it (I4), so the bridge adds the `wf` check for app callers only: not listed → 403 `not_in_workflow`. Target gate (PK-D6): the op goes to a target only when its last reported `sdkVersion` (the status push, `ctx.health`) is at least `APP_HOLD_STATUS_MIN_SDK` (`app-calls.ts`, "0.1.41": a reservation until the miniapp-sdk that ships SDK-API §4.7 is released); lower, malformed or never reported → `not_in_workflow` and the target is not called. Agent calls are unchanged. The app's answer is passed through as it is: an unknown or not-owned hold is the app's `404 hold_not_found` (errata 1), and after the approved repeat the receipt status is `run` (errata 2, the app's rule).
