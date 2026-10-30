@@ -2,6 +2,13 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.14 — owner drafts (spec 0.1.89, BRIDGE §8.8, C380)
+
+- **Owner-draft relays (cap `owner_drafts`).** `POST /tb/v1/owner-drafts`, `/get` and `/withdraw` forward an app's stop request to Core with the bridge assertion and `ins` = the instance that signed `TB-Assert`. Core's status, envelope and `Retry-After` pass through. The bridge decides nothing else and keeps nothing. Only the owner approves, in the browser.
+- Refused before Core: a service or a pending-claim key (401), config absent or expired (503), a paused instance or workspace (403), draining (503), a body with `ins` or a bad key (400), the app-initiated bucket (429). A standalone bridge answers 409 `owner_drafts_unsupported` and does not report the cap.
+- An app that needs this declares `requires.bridge` 0.2.14. An older bridge then refuses it `bridge_too_old`.
+- Spec pin stays 0.1.78; `owner-drafts.ts` and `caps.ts` hold a marked local copy of the 0.1.89 names.
+
 ## 0.2.13 — acting agents and the policy recheck (spec 0.1.88, C378)
 
 - **Acting agents (BRIDGE §8.7, cap `acting_agents`).** A companion call made inside an agent's open call, by that call's target, carries `tb.acting`. A K15 ticket from `POST /tb/v1/acting-tickets` carries the agent on durable work, for one job. Narrow only. A bad ticket refuses the call. A hook app inherits nothing. The parent's `tb.onBehalfOf` now stays on the chain.
