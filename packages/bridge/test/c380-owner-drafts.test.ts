@@ -14,9 +14,9 @@ import { type AppClient, claimApp } from "./support/app-client.ts";
 import { BRG, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
-const KEY = "pln_01M66TESTPLAN";
+const PLAN = "pln_test_1";
 const STEPS = [{ opId: "agents.pause", agt: "agt_01HAAAAAAAAAAAAAAAAAAAAAAA" }];
-const REQUEST = { key: KEY, title: "Governance: stop request", planDigest: "sha256:aa", expiresInSec: 3600, steps: STEPS };
+const REQUEST = { key: PLAN, title: "Governance: stop request", planDigest: "sha256:aa", expiresInSec: 3600, steps: STEPS };
 const SVC_CODE = "tbe_ownerdraftservicecode";
 const CORE = { request: "/api/v1/bridge/owner-drafts/request", get: "/api/v1/bridge/owner-drafts/get", withdraw: "/api/v1/bridge/owner-drafts/withdraw" };
 
@@ -90,6 +90,8 @@ describe("owner-draft relays (C380)", () => {
   // ── pending-claim key: must run before the key is listed ──
   test("a key Core has not listed (pending claim) passes assertCaller but is refused 401 unauthenticated; a listed key is not", async () => {
     await notForwarded(() => post(OWNER_DRAFT_PATHS.request, REQUEST), 401, "unauthenticated");
+    // this guard, not assertCaller
+    assert.match((await post(OWNER_DRAFT_PATHS.request, REQUEST)).json?.error?.message, /not listed by Portal/);
     await w.amend((c) => {
       c.instanceKeys.push({ ins: INS, jwk: appKey.publicJwk } as never);
     });
@@ -99,7 +101,7 @@ describe("owner-draft relays (C380)", () => {
   });
 
   // ── the three relays ──
-  for (const [kind, body] of [["request", REQUEST], ["get", { key: KEY }], ["withdraw", { key: KEY }]] as const) {
+  for (const [kind, body] of [["request", REQUEST], ["get", { key: PLAN }], ["withdraw", { key: PLAN }]] as const) {
     test(`${kind}: forwarded with the verified ins, Core's status and body unchanged`, async () => {
       const r = await post(OWNER_DRAFT_PATHS[kind], body);
       assert.equal(r.status, 200);
@@ -173,12 +175,12 @@ describe("owner-draft relays (C380)", () => {
       await w.publish((c) => pause(c.pause));
       await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
       await notForwarded(() => post(OWNER_DRAFT_PATHS.request, REQUEST), 403, "paused");
-      await notForwarded(() => post(OWNER_DRAFT_PATHS.get, { key: KEY }), 403, "paused");
-      await notForwarded(() => post(OWNER_DRAFT_PATHS.withdraw, { key: KEY }), 403, "paused");
+      await notForwarded(() => post(OWNER_DRAFT_PATHS.get, { key: PLAN }), 403, "paused");
+      await notForwarded(() => post(OWNER_DRAFT_PATHS.withdraw, { key: PLAN }), 403, "paused");
     }
     await w.publish();
     await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
-    assert.equal((await post(OWNER_DRAFT_PATHS.get, { key: KEY })).status, 200);
+    assert.equal((await post(OWNER_DRAFT_PATHS.get, { key: PLAN })).status, 200);
   });
   test("draining: 503 temporarily_unavailable with Retry-After, nothing asked; not draining is quiet", async () => {
     w.bridge.ctx.draining = true;
@@ -242,7 +244,7 @@ describe("owner-draft relays (C380)", () => {
     const steps = Array.from({ length: 100 }, (_, i) => ({ status: "applied", output: { removed: Array.from({ length: 50 }, (_x, j) => `edge_${i}_${j}_${"x".repeat(40)}`) } }));
     assert.ok(Buffer.byteLength(JSON.stringify(steps)) > OWNER_DRAFT_BODY_MAX_BYTES);
     w.core.answer = (_p, _b, res) => json(res, 200, { state: "applied", steps, receiptId: "rcp_1" });
-    const r = await post(OWNER_DRAFT_PATHS.get, { key: KEY });
+    const r = await post(OWNER_DRAFT_PATHS.get, { key: PLAN });
     assert.equal(r.status, 200);
     assert.equal(r.json?.steps?.length, 100);
   });
@@ -252,7 +254,7 @@ describe("owner-draft relays (C380)", () => {
       held = res;
     };
     const fake = { writeHead: () => fake, end: () => fake } as never;
-    await assert.rejects(relayOwnerDraft(w.bridge.ctx, "get", { ins: INS as never, svc: undefined }, new TokenBucket(1, 1), Buffer.from(JSON.stringify({ key: KEY })), fake, "req", 50), (e: unknown) => (e as { code?: string; status?: number }).code === "portal_unavailable" && (e as { status?: number }).status === 503);
+    await assert.rejects(relayOwnerDraft(w.bridge.ctx, "get", { ins: INS as never, svc: undefined }, new TokenBucket(1, 1), Buffer.from(JSON.stringify({ key: PLAN })), fake, "req", 50), (e: unknown) => (e as { code?: string; status?: number }).code === "portal_unavailable" && (e as { status?: number }).status === 503);
     held?.socket?.destroy();
   });
 
@@ -274,7 +276,7 @@ describe("owner-draft relays (C380)", () => {
     let asked = 0;
     for (let i = 0; i < 80 && !limited; i++) {
       asked = w.core.seen.length;
-      const r = await post(OWNER_DRAFT_PATHS.get, { key: KEY });
+      const r = await post(OWNER_DRAFT_PATHS.get, { key: PLAN });
       if (r.status === 429) limited = r;
     }
     assert.ok(limited, "the bucket fires");

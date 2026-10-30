@@ -48,8 +48,8 @@ export interface OwnerDraftCaller {
 
 /**
  * One relay, BRIDGE §8.8. Refusals before Core: a service or a key Core has not listed yet (401 `unauthenticated`), no or expired
- * config (503), standalone (409), an instance or workspace pause (403 `paused`), the app bucket (429), a body that is not an object
- * with a key, or that has a member `ins` (400 `input_invalid`). No readable answer from Core: 503 `portal_unavailable`.
+ * config (503), standalone (409), an instance or workspace pause (403 `paused`), a body that is not an object with a key, or that has
+ * a member `ins` (400 `input_invalid`), then the app bucket (429): a refused body spends nothing. No readable answer from Core: 503 `portal_unavailable`.
  */
 export async function relayOwnerDraft(ctx: BridgeContext, kind: OwnerDraftKind, caller: OwnerDraftCaller, bucket: TokenBucket, raw: Buffer, res: ServerResponse, requestId: string, timeoutMs = OWNER_DRAFT_CORE_TIMEOUT_MS): Promise<void> {
   if (caller.svc) throw new BridgeError("unauthenticated", 401, "services cannot ask for owner drafts");
@@ -59,12 +59,12 @@ export async function relayOwnerDraft(ctx: BridgeContext, kind: OwnerDraftKind, 
   if (t.pausedWorkspace || t.pausedInstances.has(caller.ins)) throw new BridgeError("paused", 403);
   // assertCaller also accepts the key of a pending claim. Core does not know that key yet, so it cannot speak for the instance here.
   if (!t.instanceKeys.has(`${caller.ins}|`)) throw new BridgeError("unauthenticated", 401, "this instance key is not listed by Portal yet");
-  const wait = bucket.take(caller.ins);
-  if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many requests from this instance; retry later"), requestId, { "retry-after": String(wait) });
   const body = parseJson(raw);
   if (!isRecord(body)) throw new BridgeError("input_invalid", 400, "the body must be a JSON object", { pointer: "" });
   if (Object.hasOwn(body, "ins")) throw new BridgeError("input_invalid", 400, "ins is set by the bridge", { pointer: "/ins" });
   if (typeof body.key !== "string" || !KEY_RE.test(body.key)) throw new BridgeError("input_invalid", 400, "key must be a request key", { pointer: "/key" });
+  const wait = bucket.take(caller.ins);
+  if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many requests from this instance; retry later"), requestId, { "retry-after": String(wait) });
 
   const started = Date.now();
   let status = 0;
