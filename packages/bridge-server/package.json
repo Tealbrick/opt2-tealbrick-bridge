@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/bridge-server",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "private": true,
   "type": "module",
   "description": "Deployed bridge entry for the workspace private network.",
