@@ -18,6 +18,7 @@ import { missingBridgeCap } from "./caps.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { resolveForCaller } from "./model-roles.ts";
+import { OWNER_DRAFT_ROUTES, readOwnerDraftBody, relayOwnerDraft } from "./owner-drafts.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
@@ -160,6 +161,12 @@ export class InternalApi {
       if (req.method === "POST" && (url.pathname === ACTING_TICKETS_PATH || url.pathname === POLICY_RECHECK_PATH)) {
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
         return url.pathname === ACTING_TICKETS_PATH ? await this.actingTickets(req, res, requestId) : await this.policyRecheck(req, res, requestId);
+      }
+      const ownerDraft = req.method === "POST" ? OWNER_DRAFT_ROUTES.get(url.pathname) : undefined;
+      if (ownerDraft) {
+        if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
+        const raw = await readOwnerDraftBody(req);
+        return await relayOwnerDraft(this.ctx, ownerDraft, this.assertCaller(req, raw), this.appInitiated, raw, res, requestId);
       }
       if (req.method === "POST" && url.pathname === BRIDGE_INTERNAL_PATHS.events) {
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });

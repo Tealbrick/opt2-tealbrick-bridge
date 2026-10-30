@@ -31,6 +31,8 @@
  *    and the target is not called. Agent calls are unchanged.
  *  - `acting_agents` (spec 0.1.88, bridge 0.2.13, BRIDGE §8.7, C378) = context `tb.acting` on a companion call from the open-call table (target only) and from K15 tickets
  *    (`acting.ts`, calls.ts `route`), `POST /tb/v1/acting-tickets` and `POST /tb/v1/policy-recheck` (internal.ts). Acting facts narrow only: nothing here reads them for access.
+ *  - `owner_drafts` (spec 0.1.89, bridge 0.2.14, C380) = the three relays `POST /tb/v1/owner-drafts{,/get,/withdraw}` to Core (owner-drafts.ts, internal.ts). Only Core and the
+ *    owner decide. Not reported by a standalone bridge: it has no Portal to approve a draft ({@link bridgeCaps}).
  *  - `app_call_context` (spec 0.1.77, bridge 0.2.11, BRIDGE §8.5, C367 P4) = a companion `CallEnvelope.context` is validated against
  *    the presented grant's verified `prd` (400 `input_invalid` + `details.pointer`), merged into the op body `context` before the
  *    before hooks and bound by the op proof's `ctx` digest (calls.ts `route`, app-calls.ts `callerContextKeys`).
@@ -43,16 +45,20 @@ import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
 import { ACTING_AGENTS_CAP } from "./acting.ts";
 
 /** spec 0.1.77: `BRIDGE_CAPS` carries every cap this build names (`hook_tool` and `secret_output` since 0.1.68), so a misspelt entry fails to compile. */
-export type DeclaredCap = BridgeCap | typeof ACTING_AGENTS_CAP;
+// LOCAL COPY of spec 0.1.89 (bridge.ts), like ACTING_AGENTS_CAP: drop it with the spec pin move. Here, not in owner-drafts.ts: that module needs portal.ts, which needs this one.
+export const OWNER_DRAFTS_CAP = "owner_drafts";
+export type DeclaredCap = BridgeCap | typeof ACTING_AGENTS_CAP | typeof OWNER_DRAFTS_CAP;
 
-export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", ACTING_AGENTS_CAP];
+export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", ACTING_AGENTS_CAP, OWNER_DRAFTS_CAP];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
- * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
+ * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes), and without `owner_drafts`
+ * on a standalone bridge (no Portal, so an app must not offer the feature). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): DeclaredCap[] {
-  return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined; table?: { standalone: boolean } | undefined; state?: { standalone: unknown } | undefined }): DeclaredCap[] {
+  const standalone = ctx.table?.standalone === true || !!ctx.state?.standalone;
+  return BRIDGE_CAPS_DECLARED.filter((c) => (c !== "events" || ctx.events?.available === true) && (c !== OWNER_DRAFTS_CAP || !standalone));
 }
 
 /**
