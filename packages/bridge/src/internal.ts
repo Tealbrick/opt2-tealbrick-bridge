@@ -11,8 +11,9 @@ import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import type { ErrorCode } from "@opt2-tealbrick/spec/routes";
 import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
+import { ACTING_TICKETS_PATH, type ActingTicketRequest, type ActingTicketResponse, mintActingTickets, POLICY_RECHECK_PATH, type PolicyRecheckRequest, type PolicyRecheckResponse, validJob, verifyActing } from "./acting.ts";
 import type { CallRouter } from "./calls.ts";
-import { CALL_ID_RE } from "./calls.ts";
+import { CALL_ID_RE, sliceGrants } from "./calls.ts";
 import { missingBridgeCap } from "./caps.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
@@ -20,7 +21,7 @@ import { resolveForCaller } from "./model-roles.ts";
 import { fetchManifestFrom } from "./portal.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
-import { type AppRuntime, acceptedDigests, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
+import { type AppRuntime, acceptedDigests, grantKey, insRef, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
@@ -54,6 +55,15 @@ function pathSegment(raw: string): string {
 const MODEL_ROLES_PREFIX = BRIDGE_INTERNAL_PATHS.modelRoles.slice(0, -"{role}".length);
 
 const pauseSignature = (t: Table): string => `${t.pausedWorkspace}|${[...t.pausedAgents].sort().join(",")}|${[...t.pausedInstances].sort().join(",")}`;
+
+/** The `aud` of a compact grant, unverified: only to pick the slice grant that the gate then verifies. */
+function peekAud(grant: string): unknown {
+  try {
+    return (JSON.parse(Buffer.from(grant.split(".")[1] ?? "", "base64url").toString("utf8")) as { aud?: unknown }).aud;
+  } catch {
+    return undefined;
+  }
+}
 
 export class InternalApi {
   private readonly ctx: BridgeContext;
@@ -146,6 +156,10 @@ export class InternalApi {
         // F57a: no new companion call while draining (retryable; nothing ran)
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
         return await this.companionCall(req, res, requestId);
+      }
+      if (req.method === "POST" && (url.pathname === ACTING_TICKETS_PATH || url.pathname === POLICY_RECHECK_PATH)) {
+        if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
+        return url.pathname === ACTING_TICKETS_PATH ? await this.actingTickets(req, res, requestId) : await this.policyRecheck(req, res, requestId);
       }
       if (req.method === "POST" && url.pathname === BRIDGE_INTERNAL_PATHS.events) {
         if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
@@ -383,9 +397,13 @@ export class InternalApi {
       const wait = this.appInitiated.take(caller.ins);
       if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many app-initiated calls from this instance; retry later"), requestId, { "retry-after": String(wait) });
     }
+    // spec 0.1.88 (BRIDGE §8.7 rule 5): before the gate; a bad ticket refuses the call, never a fallback to "no agent"
+    const envActing = (env as { acting?: unknown }).acting;
+    const acting = envActing !== undefined ? verifyActing(this.ctx, t, caller.ins, envActing) : undefined;
     try {
       const { result } = await this.router.route({
         caller: { type: "app", ins: caller.ins, grant },
+        ...(acting ? { acting } : {}),
         target: { app, op, ...(op.standard || !op.dynamic ? {} : isRecord(env.input) && typeof env.input.tool === "string" ? { tool: env.input.tool } : {}) },
         input: (env.input ?? {}) as Json,
         ...(env.idempotencyKey ? { idempotencyKey: env.idempotencyKey } : {}),
@@ -398,6 +416,57 @@ export class InternalApi {
       const code = e instanceof BridgeError ? e.code : "app_error";
       sendJson(res, e instanceof BridgeError && e.status !== 400 ? e.status : statusFor(code), envelope(code, e instanceof Error ? e.message : code, requestId, e instanceof BridgeError ? e.details : undefined));
     }
+  }
+
+  // ── §8.7 rule 4: an acting ticket for one durable job, only during the agent's own open call ──
+  private async actingTickets(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
+    const raw = await readBody(req, 4096);
+    const caller = this.assertCaller(req, raw);
+    if (caller.svc) throw new BridgeError("unauthenticated", 401, "services cannot mint acting tickets");
+    if (!this.ctx.table || this.ctx.configExpired()) throw new BridgeError("config_expired", 503);
+    if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
+    const wait = this.appInitiated.take(caller.ins);
+    if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many requests from this instance; retry later"), requestId, { "retry-after": String(wait) });
+    const body = parseJson(raw) as ActingTicketRequest;
+    if (!isRecord(body) || typeof body.call !== "string" || !CALL_ID_RE.test(body.call) || !validJob(body.job)) throw new BridgeError("input_invalid", 400);
+    const open = this.router.openCallAgents(caller.ins, body.call);
+    if (!open) throw new BridgeError("acting_call_invalid", 403, "no open agent call was delivered to this instance");
+    const tickets = await mintActingTickets(this.ctx, caller.ins, open.agents.map((a) => a.id), body.call, open.op, body.job);
+    sendJson(res, 200, { tickets } satisfies ActingTicketResponse);
+  }
+
+  // ── §8.7 rule 6: would this call to my own op pass now? Nothing is forwarded and nothing is written ──
+  private async policyRecheck(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
+    const raw = await readBody(req, 2 * 1024 * 1024);
+    const caller = this.assertCaller(req, raw);
+    if (caller.svc) throw new BridgeError("unauthenticated", 401, "services cannot ask for a recheck");
+    const t = this.ctx.table;
+    if (!t || this.ctx.configExpired()) throw new BridgeError("config_expired", 503);
+    if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
+    const wait = this.appInitiated.take(caller.ins);
+    if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many requests from this instance; retry later"), requestId, { "retry-after": String(wait) });
+    const body = parseJson(raw) as PolicyRecheckRequest;
+    // no target field: an app can ask only about itself
+    if (!isRecord(body) || Object.keys(body).some((k) => !["op", "input", "caller"].includes(k)) || typeof body.op !== "string" || !isRecord(body.caller)) throw new BridgeError("input_invalid", 400);
+    const app = t.apps.get(caller.ins);
+    if (!app || app.down || !app.manifest) throw new BridgeError("app_unavailable", 503);
+    const op = app.ops.get(body.op);
+    if (!op || op.standard || op.dynamic || op.audience !== "agent") throw new BridgeError("unknown_tool", 404);
+    const who = body.caller;
+    let routed: Parameters<CallRouter["route"]>[0]["caller"];
+    if (who.type === "agent" && typeof who.id === "string") {
+      if (!t.grants.has(grantKey(`tb:agt:${who.id}`, insRef(caller.ins)))) throw new BridgeError("no_grant", 403);
+      routed = { type: "agent", agt: who.id as never, con: undefined as never };
+    } else if (who.type === "app" && typeof who.id === "string") {
+      const aud = insRef(caller.ins);
+      const grant = sliceGrants(t.apps.get(who.id as InstanceId))?.find((g) => peekAud(g) === aud);
+      if (!grant) throw new BridgeError("no_grant", 403);
+      routed = { type: "app", ins: who.id as InstanceId, grant };
+    } else throw new BridgeError("input_invalid", 400);
+    const recheck: { verdict?: { f: string; r: string; by: string } | null } = {};
+    await this.router.route({ caller: routed, target: { app, op }, input: (body.input ?? {}) as Json, recheck });
+    const v = recheck.verdict;
+    sendJson(res, 200, (v ? { decision: "hold", family: v.f, reason: v.r, by: v.by } : { decision: "allow" }) satisfies PolicyRecheckResponse);
   }
 
   // ── §14.1 app events ingest (bridge 0.2.7) ──

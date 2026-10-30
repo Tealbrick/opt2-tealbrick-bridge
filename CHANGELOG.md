@@ -2,6 +2,12 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.13 — acting agents and the policy recheck (spec 0.1.88, C378)
+
+- **Acting agents (BRIDGE §8.7, cap `acting_agents`).** A companion call made inside an agent's open call, by that call's target, carries `tb.acting`. A K15 ticket from `POST /tb/v1/acting-tickets` carries the agent on durable work, for one job. Narrow only. A bad ticket refuses the call. A hook app inherits nothing. The parent's `tb.onBehalfOf` now stays on the chain.
+- **`POST /tb/v1/policy-recheck`.** Gate, before hooks and re-gate on the asserting instance's own op, for send-time checks. Nothing is forwarded; no hold, receipt or cap count.
+- Spec pin stays 0.1.78 like the manifest's; `acting.ts` holds a marked local copy of the 0.1.88 names.
+
 ## 0.2.12 — manifest 0.1.35 (Governance 0.3.1 `needsTopology`, C373 G-2)
 
 - Pins `@opt2-tealbrick/manifest` 0.1.35 (also the relay override). Manifest 0.1.32 refused the top-level `needsTopology` (additional property), so the bridge refused Governance 0.3.1's manifest (`schema_invalid`) and Core rolled the update back on DEV (qa1, 2026-10-28). Manifest 0.1.35 accepts it with `needsAgentDirectory` (M-TP-1). Spec stays 0.1.78. No code change; upgradeFrom unchanged (>=0.1.31).

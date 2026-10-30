@@ -17,6 +17,7 @@ import type {
 import { type AgentId, BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
+import { type ActingAgent, mergeActing } from "./acting.ts";
 import { APP_HOLD_STATUS_MIN_SDK, APP_HOLD_STATUS_OP, callerContextKeys, sdkVersionAtLeast } from "./app-calls.ts";
 import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
@@ -49,6 +50,13 @@ export interface CallRequest {
    * selected and before any hook, and merges the keys into the op body `context`.
    */
   callerContext?: unknown;
+  /** spec 0.1.88 (BRIDGE §8.7): agents from verified K15 tickets (`CallEnvelope.acting`); the parent chain is added in `route` */
+  acting?: readonly ActingAgent[];
+  /**
+   * spec 0.1.88 (BRIDGE §8.7 rule 6): check only. Gate, before hooks and re-gate run; context hooks, forward and after hooks do not, so nothing
+   * reaches the app and no hold, receipt or cap count is written. `route` puts the kept hold verdict here (`null` = allow).
+   */
+  recheck?: { verdict?: { f: string; r: string; by: string } | null };
 }
 
 export type CallOutcome = OpResult<JsonValue>;
@@ -143,6 +151,14 @@ interface Active {
   /** A2A-2: instances this call was delivered to (target app, hook apps); only they may name it as parentCall */
   deliveredTo: Set<string>;
   startedMs: number;
+  /** spec 0.1.88 (BRIDGE §8.7): the instance this call was delivered to as TARGET: only it inherits or mints from this call */
+  targetIns: string;
+  /** the op of this call, stamped into a K15 */
+  opId: string;
+  /** the agent caller, or the acting agents of an app caller: what a child call inherits */
+  agents: readonly ActingAgent[];
+  /** the reserved context this call carries: a child call on the chain keeps its `tb.onBehalfOf` */
+  reserved: JsonObject;
 }
 
 /** A2A-2/3: a parentCall is `call_` + ULID; anything else is refused before it is logged or looked up */
@@ -237,6 +253,16 @@ export class CallRouter {
     const a = this.active.get(parentCall as CallId);
     if (!a || !a.deliveredTo.has(callerIns) || Date.now() - a.startedMs > PARENT_CALL_TTL_MS) return undefined;
     return parentCall as CallId;
+  }
+
+  /**
+   * spec 0.1.88 (BRIDGE §8.7 rule 4): the agents and the op of an OPEN call delivered to `ins` as its target and not in a hook, or
+   * undefined. A hook app that the call was also delivered to gets nothing: it could otherwise name any call it sees.
+   */
+  openCallAgents(ins: string, call: string): { agents: readonly ActingAgent[]; op: string } | undefined {
+    const a = this.active.get(call as CallId);
+    if (!a || a.inHook || a.targetIns !== ins || a.agents.length === 0 || Date.now() - a.startedMs > PARENT_CALL_TTL_MS) return undefined;
+    return { agents: a.agents, op: a.opId };
   }
 
   private count(key: string): void {
@@ -528,9 +554,24 @@ export class CallRouter {
       depth = (parent?.depth ?? 0) + 1;
       if (depth > 3) throw new BridgeError("call_depth_exceeded", 409);
     }
-    const active: Active = { inHook: false, depth, deliveredTo: new Set([target.app.entry.ins]), startedMs: Date.now() };
+    // spec 0.1.88 (BRIDGE §8.7 rule 3): only the parent's TARGET inherits; a hook app the parent was delivered to does not
+    const parentCall = caller.type === "app" && req.parentCall ? this.active.get(req.parentCall) : undefined;
+    const heir = parentCall && caller.type === "app" && parentCall.targetIns === caller.ins ? parentCall : undefined;
+    const active: Active = {
+      inHook: false,
+      depth,
+      deliveredTo: new Set([target.app.entry.ins]),
+      startedMs: Date.now(),
+      targetIns: target.app.entry.ins,
+      opId: target.op.id,
+      agents: caller.type === "agent" ? [{ id: caller.agt as AgentId, via: "parent_call" }] : [],
+      reserved: {},
+    };
     this.active.set(call, active);
     try {
+      const inherited: ActingAgent[] = heir ? heir.agents.map((a) => ({ id: a.id, via: "parent_call" })) : [];
+      const acting = caller.type === "app" ? mergeActing(req.acting ?? [], inherited) : [];
+      if (caller.type === "app") active.agents = acting;
       if (target.app.down || !target.app.manifest) throw new BridgeError("app_unavailable", 503);
       // spec 0.1.68 (BRIDGE v0.1.68, cap `secret_output`): a secretOutput op answers app callers only; an agent is refused
       // before anything runs (on every path: MCP, relay; the op is never listed for agents either)
@@ -540,7 +581,7 @@ export class CallRouter {
       // 4. input against the op schema (dynamic: the fixed DynamicCallInput shape)
       const v = ctx.api.validateInput(target.op, req.input);
       if (!v.ok) throw new BridgeError("input_invalid", 400, v.errors.slice(0, 3).join("; "));
-      if (!target.op.standard && target.op.idempotency === "required" && !req.idempotencyKey) {
+      if (!req.recheck && !target.op.standard && target.op.idempotency === "required" && !req.idempotencyKey) {
         throw new BridgeError("input_invalid", 400, "idempotency key required");
       }
       // 5. gate
@@ -598,7 +639,15 @@ export class CallRouter {
       // the caller's keys first (v0.1.77, §8.5), then the bridge's reserved `tb.*` keys: the two sets never overlap (a caller key
       // is `<product>.…` and `tb.` is refused), the order only states who owns a collision. Hooks and the app see both, and the
       // op proof's `ctx` digest covers them.
-      let context: JsonObject = { ...(callerKeys ?? {}), ...(req.reservedContext ?? {}) };
+      // spec 0.1.88 (BRIDGE §8.7): the parent's claim stays on the chain; `tb.acting` and `tb.recheck` are written here and nowhere else
+      const inheritedClaim = heir?.reserved["tb.onBehalfOf"];
+      active.reserved = { ...(inheritedClaim !== undefined ? { "tb.onBehalfOf": inheritedClaim } : {}), ...(req.reservedContext ?? {}) };
+      let context: JsonObject = {
+        ...(callerKeys ?? {}),
+        ...active.reserved,
+        ...(acting.length > 0 ? { "tb.acting": { v: 1, agents: acting } as unknown as JsonValue } : {}),
+        ...(req.recheck ? { "tb.recheck": true } : {}),
+      };
       // 6. before hooks (fail closed). v0.1.13: answers allow | refuse | hold, shape-checked and reduced by the shared
       // rule (manifest hookResponseProblem + reduceBeforeChain): the first refuse stops the chain at once; else the
       // FIRST hold is kept and the remaining hooks still run (a later refuse wins). Runs for every call, a retry
@@ -622,7 +671,7 @@ export class CallRouter {
       if (chain.kind === "refuse") throw new BridgeError("hook_denied", 403, chain.reason ? chain.reason.slice(0, 200) : `denied by ${chain.by}`);
       const hv = chain.kind === "hold" ? ctx.api.holdVerdictClaim(chain) : undefined;
       // 7. context hooks (namespaced additions; never `tb.*`, the shared rule checks both)
-      for (const h of this.matchingHooks(t0, "context", target, op)) {
+      for (const h of req.recheck ? [] : this.matchingHooks(t0, "context", target, op)) {
         let r: ContextHookResponse;
         try {
           r = await this.callHook<ContextHookResponse>(t0, h, call, { phase: "context", call: callInfo, context }, callerRef, req.input);
@@ -646,6 +695,11 @@ export class CallRouter {
       // swap during the before/context hooks that drops a declared hook refuses the call here, before it is forwarded
       // (always run: a manifest fetched during the hooks can add declared hooks to the same table).
       this.requireListedHooks(t1, target1, op);
+      // spec 0.1.88 (BRIDGE §8.7 rule 6): a recheck ends here. Nothing is forwarded, so nothing is written anywhere but the hook app's own trace
+      if (req.recheck) {
+        req.recheck.verdict = hv ?? null;
+        return { call, result: { status: "ok", output: null } as unknown as CallOutcome };
+      }
       // 10. forward
       const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context, hv);
       // 12. after hooks (ok only). spec 0.1.68: never for a secretOutput op — the result goes to the caller only
@@ -678,7 +732,8 @@ export class CallRouter {
         ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins, parentCall: req.parentCall ?? null }),
         product: target.app.entry.product,
         op: target.op.id,
-        decision: code === "ok" ? "forwarded" : "refused",
+        decision: code !== "ok" ? "refused" : req.recheck ? "rechecked" : "forwarded",
+        ...(caller.type === "app" && active.agents.length > 0 ? { acting: active.agents.map((a) => a.id), ...(active.agents[0]?.job ? { job: active.agents[0].job } : {}) } : {}),
         code,
         ms: Date.now() - started,
         inDigest: safeDigest(ctx, req.input),

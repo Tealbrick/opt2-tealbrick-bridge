@@ -29,6 +29,8 @@
  *    routed when the presented grant's `wf` lists it (calls.ts `runGate`; the I4 CRUD skip of gate() applies), and only to a
  *    target whose last reported `sdkVersion` is at least `APP_HOLD_STATUS_MIN_SDK` (app-calls.ts); otherwise `not_in_workflow`
  *    and the target is not called. Agent calls are unchanged.
+ *  - `acting_agents` (spec 0.1.88, bridge 0.2.13, BRIDGE §8.7, C378) = context `tb.acting` on a companion call from the open-call table (target only) and from K15 tickets
+ *    (`acting.ts`, calls.ts `route`), `POST /tb/v1/acting-tickets` and `POST /tb/v1/policy-recheck` (internal.ts). Acting facts narrow only: nothing here reads them for access.
  *  - `app_call_context` (spec 0.1.77, bridge 0.2.11, BRIDGE §8.5, C367 P4) = a companion `CallEnvelope.context` is validated against
  *    the presented grant's verified `prd` (400 `input_invalid` + `details.pointer`), merged into the op body `context` before the
  *    before hooks and bound by the op proof's `ctx` digest (calls.ts `route`, app-calls.ts `callerContextKeys`).
@@ -38,17 +40,18 @@
  *    registration (`missingBridgeCap` → `bridge_cap_missing`) because the cap is not declared, so no such app runs here.
  */
 import type { BridgeCap } from "@opt2-tealbrick/spec/bridge";
+import { ACTING_AGENTS_CAP } from "./acting.ts";
 
 /** spec 0.1.77: `BRIDGE_CAPS` carries every cap this build names (`hook_tool` and `secret_output` since 0.1.68), so a misspelt entry fails to compile. */
-export type DeclaredCap = BridgeCap;
+export type DeclaredCap = BridgeCap | typeof ACTING_AGENTS_CAP;
 
-export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context"];
+export const BRIDGE_CAPS_DECLARED: readonly DeclaredCap[] = ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", ACTING_AGENTS_CAP];
 
 /**
  * The caps to report NOW (StatusReport, re-minted standalone slices): the build's set, without `events` while the event log
  * is not available (bridge 0.2.7, events.ts: not open, or unhealthy for 5 min until 3 good probes). A copy.
  */
-export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): BridgeCap[] {
+export function bridgeCaps(ctx: { events?: { available: boolean } | undefined }): DeclaredCap[] {
   return BRIDGE_CAPS_DECLARED.filter((c) => c !== "events" || ctx.events?.available === true);
 }
 

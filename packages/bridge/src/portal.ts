@@ -547,7 +547,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     rev: t?.rev ?? 0,
     appliedAt: new Date().toISOString(),
     // spec 0.1.54 (C292): the capabilities this build implements, in EVERY report (caps.ts: only with the code they name)
-    bridge: { id: id.bridgeId, version: BRIDGE_VERSION, form: ctx.form, boot: ctx.boot, sdkMajors: SDK_MAJORS, mcpVersions: MCP_VERSIONS, caps: bridgeCaps(ctx) },
+    bridge: { id: id.bridgeId, version: BRIDGE_VERSION, form: ctx.form, boot: ctx.boot, sdkMajors: SDK_MAJORS, mcpVersions: MCP_VERSIONS, caps: bridgeCaps(ctx) as never },
     portalReachable: ctx.portalReachable(now),
     portalKeysDigest: ctx.api.digest(id.portalKeys as unknown as Json),
     apps,
