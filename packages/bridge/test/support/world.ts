@@ -137,6 +137,8 @@ export interface World {
   /** serve a document signed by an untrusted key as the next revision */
   serveForged(): Promise<void>;
   configPulls(): number;
+  /** a fake Core route (bridge-authenticated, after the assertion check): every other request of the bridge lands here; `answer` undefined = 404 */
+  core: { seen: { path: string; body: unknown }[]; answer?: (path: string, body: Record<string, unknown>, res: ServerResponse) => void | Promise<void> };
   /** stop answering as Portal (simulates Portal down) */
   portalDown(): void;
   rejectedBridgeAssertions(): number;
@@ -217,6 +219,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const bridgeOps: World["bridgeOps"] = { seen: [] };
   const viewer: World["viewer"] = { seen: [] };
   let down = false;
+  const core: World["core"] = { seen: [] };
   let pulls = 0;
   let ackFails = false;
   let assertFailures = 0;
@@ -422,6 +425,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       acks.push(JSON.parse(raw.toString("utf8")));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ accepted: true, configRevision: rev }));
     }
+    core.seen.push({ path: url.pathname, body: raw.length ? JSON.parse(raw.toString("utf8")) : undefined });
+    if (core.answer) return await core.answer(url.pathname, raw.length ? JSON.parse(raw.toString("utf8")) : {}, res);
     res.writeHead(404).end();
   });
 
@@ -483,6 +488,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const world: World = {
     bridge,
     ports,
+    core,
     bridgeEnv,
     publicUrl,
     keysUrl,

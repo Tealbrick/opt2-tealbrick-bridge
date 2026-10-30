@@ -18,9 +18,11 @@ import { verifyActing } from "../src/acting.ts";
 import { APP_HOLD_STATUS_MIN_SDK } from "../src/app-calls.ts";
 import { CallRouter } from "../src/calls.ts";
 import { BRIDGE_CAPS_DECLARED } from "../src/caps.ts";
+import { relayOwnerDraft } from "../src/owner-drafts.ts";
 import { buildStatusReport } from "../src/portal.ts";
 import { trustFor } from "../src/table.ts";
 import { visibleOps } from "../src/tools.ts";
+import { TokenBucket } from "../src/util.ts";
 import { AGT, BRG, CON, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -115,6 +117,23 @@ const PROBES: Record<string, (w: World) => Promise<void>> = {
     assert.equal(w.appLog.ops.length, before, "a recheck forwards nothing");
     assert.throws(() => verifyActing(w.bridge.ctx, t, INS as never, { job: "j", tickets: ["a.b.c"] }), (e: unknown) => (e as { code?: string }).code === "acting_ticket_invalid");
   },
+  owner_drafts: async (w) => {
+    const t = w.bridge.ctx.table;
+    assert.ok(t);
+    const key = `${INS}|`;
+    t.instanceKeys.set(key, { keys: [] } as never);
+    try {
+      const fake = { writeHead: () => fake, end: () => fake } as never;
+      w.core.answer = (_p, _b, res) => void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ state: "open" }));
+      await relayOwnerDraft(w.bridge.ctx, "request", { ins: INS as never, svc: undefined }, new TokenBucket(1, 1), Buffer.from(JSON.stringify({ key: "pln_probe" })), fake, "req");
+      const seen = w.core.seen[w.core.seen.length - 1];
+      assert.equal(seen?.path, "/api/v1/bridge/owner-drafts/request");
+      assert.deepEqual(seen?.body, { key: "pln_probe", ins: INS });
+    } finally {
+      t.instanceKeys.delete(key);
+      w.core.answer = undefined;
+    }
+  },
   owner_rows: async (w) => {
     const t = w.bridge.ctx.table;
     const app = t?.apps.get(INS as never);
@@ -146,11 +165,11 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.close();
   });
 
-  test("the bridge declares exactly owner_rows, events, model_roles, hook_tool, app_hold_status, app_call_context and acting_agents (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
-    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents"]);
+  test("the bridge declares exactly owner_rows, events, model_roles, hook_tool, app_hold_status, app_call_context, acting_agents and owner_drafts (secret_output waits for the manifest re-pin, C354), and only values the spec knows", () => {
+    assert.deepEqual([...BRIDGE_CAPS_DECLARED], ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents", "owner_drafts"]);
     assert.equal((BRIDGE_CAPS_DECLARED as readonly string[]).includes("secret_output"), false, "C354: not before the bridge pins a validator that accepts secretOutput");
-    // acting_agents is in spec 0.1.88; this bridge still pins 0.1.78 like its manifest (acting.ts)
-    for (const c of BRIDGE_CAPS_DECLARED) assert.ok(c === "acting_agents" || (BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
+    // acting_agents is in spec 0.1.88 and owner_drafts in 0.1.89; this bridge still pins 0.1.78 like its manifest (acting.ts, caps.ts)
+    for (const c of BRIDGE_CAPS_DECLARED) assert.ok(c === "acting_agents" || c === "owner_drafts" || (BRIDGE_CAPS as readonly string[]).includes(c), `${c} is in the spec BRIDGE_CAPS`);
   });
 
   test("every status report carries the caps: the ones Portal received and a freshly built one", async () => {
@@ -158,11 +177,11 @@ describe("StatusReport.bridge.caps (spec 0.1.54, C292)", () => {
     await w.publish();
     await waitFor(() => w.acks.some((a) => a.rev === w.rev()), 15000);
     assert.ok(w.acks.length >= 2, `reports received: ${w.acks.length}`);
-    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents"], `report rev ${a.rev}`);
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents"]);
+    for (const a of w.acks) assert.deepEqual(a.bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents", "owner_drafts"], `report rev ${a.rev}`);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents", "owner_drafts"]);
     // a copy: changing a report never changes what the next one says
     (buildStatusReport(w.bridge.ctx).bridge.caps as string[]).push("x");
-    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents"]);
+    assert.deepEqual(buildStatusReport(w.bridge.ctx).bridge.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents", "owner_drafts"]);
   });
 
   test("every declared cap has a probe, and the probe passes (the behaviour the cap names exists in this build)", async () => {
@@ -209,7 +228,7 @@ describe("standalone bridge: slice.bridge.caps from its own set (spec 0.1.54)", 
     await waitFor(() => w.bridge.ctx.table?.standalone === true && w.bridge.ctx.table?.config.iss === w.bridge.ctx.bridgeRef, 15000);
     const slice = w.bridge.ctx.table?.config.apps.find((a) => a.ins === INS)?.slice as string;
     const claims = JSON.parse(Buffer.from(slice.split(".")[1] as string, "base64url").toString("utf8")) as { bridge?: { id?: string; keys?: unknown[]; caps?: string[] } };
-    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents"]);
+    assert.deepEqual(claims.bridge?.caps, ["owner_rows", "events", "model_roles", "hook_tool", "app_hold_status", "app_call_context", "acting_agents"], "no owner_drafts: no Portal to approve one");
     assert.equal(claims.bridge?.id, BRG, "the rest of the bridge member is kept");
     assert.equal(claims.bridge?.keys?.length, 1);
   });
