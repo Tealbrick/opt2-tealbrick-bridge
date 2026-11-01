@@ -2,6 +2,12 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.15 — a first contact through a long tool name (manifest 0.1.37, C383, D-C383-JM1)
+
+- **A dynamic call may name up to 63 characters.** Input validation pins manifest 0.1.37, so `{tool, arguments}` takes the rule the resolver already had (spec `DYNAMIC_TOOL_NAME_RE`, BRIDGE v0.1.68): a catalog name (at most 48) or a variant the agent requests, such as `<tool>__first_contact`. Before, a name over 48 was refused `input_invalid` after resolve, so no hold was made for a tool with a name over 33 characters.
+- Nothing else changes. The app's resolution must still equal the requested name, a name over 63 is still refused, listed catalog names stay at most 48, and hold family, hooks and Rules matching read the same fields.
+- An app that needs this declares `requires.bridge` 0.2.15. An older bridge then refuses it `bridge_too_old`.
+
 ## 0.2.14 — owner drafts (spec 0.1.89, BRIDGE §8.8, C380)
 
 - **Owner-draft relays (cap `owner_drafts`).** `POST /tb/v1/owner-drafts`, `/get` and `/withdraw` forward an app's stop request to Core with the bridge assertion and `ins` = the instance that signed `TB-Assert`. Core's status, envelope and `Retry-After` pass through. The bridge decides nothing else and keeps nothing. Only the owner approves, in the browser.

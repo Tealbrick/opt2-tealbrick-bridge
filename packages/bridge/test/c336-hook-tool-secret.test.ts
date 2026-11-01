@@ -14,7 +14,6 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { DYNAMIC_CALL_INPUT_SCHEMA, validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import { CallRouter } from "../src/calls.ts";
 import { buildToolIndex } from "../src/tools.ts";
@@ -163,17 +162,13 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
     resolveAs = (t) => t;
   });
 
-  // The pinned manifest (0.1.30) still refuses a requested dynamic tool over 48 chars at input validation; sdk#51 widens
-  // DYNAMIC_CALL_INPUT_SCHEMA to {1,62}. The full-path test runs once the bridge pins that manifest; the resolve rule itself is
-  // tested below on the real resolver now.
-  const pinnedAccepts63 = validateAgainstSchema(DYNAMIC_CALL_INPUT_SCHEMA, { tool: `g${"m".repeat(47)}__first_contact`, arguments: {} }).ok;
+  // D-C383-JM1: manifest 0.1.37 takes a requested name of up to 63 chars, so this runs on the real input validation.
   test(
-    "BRIDGE23-1 full path (spec 0.1.68 {1,62}, C354): the agent requests a 49- and a 63-char name (a 48-char tool + `__first_contact`), the app resolves the same name → passes, it is the hook target.tool",
-    { skip: pinnedAccepts63 ? false : "needs the manifest re-pin (sdk#51: DYNAMIC_CALL_INPUT_SCHEMA tool up to 63 chars)" },
+    "BRIDGE23-1 full path (spec 0.1.68 {1,62}, C354, D-C383-JM1): the agent requests a 49- and a 63-char name (a 48-char tool + `__first_contact`) and the name that failed live, the app resolves the same name → passes, it is the hook target.tool",
     async () => {
       resolveAs = (t) => t;
       const base48 = `g${"m".repeat(47)}`;
-      for (const name of [`${base48}x`, `${base48}__first_contact`]) {
+      for (const name of [`${base48}x`, `${base48}__first_contact`, "mcp_acme_data_sources_282ebac3_gmail_send_email__first_contact"]) {
         const from = w.appLog.hooks.length;
         const r = await mcpCall("notes__notes_tools_call", { tool: name, arguments: {} });
         assert.notEqual(r.isError, true, `${name.length} chars: ${JSON.stringify(r)}`);
@@ -190,7 +185,7 @@ describe("C336: hook target tool (B29) and secretOutput ops (C-SO-1/2)", () => {
   test("BRIDGE23-1 resolver (spec 0.1.68 {1,62}, C354): a 49- and a 63-char resolution equal to the request passes; one that differs (also `<requested>__<suffix>`) or has 64 chars is refused dynamic_resolve_failed", async () => {
     const router = new CallRouter(w.bridge.ctx) as unknown as { resolve(app: unknown, op: string, tool: string): Promise<{ tool: string }> };
     const base48 = `k${"m".repeat(47)}`;
-    for (const name of [`${base48}x`, `${base48}__first_contact`]) {
+    for (const name of [`${base48}x`, `${base48}__first_contact`, "mcp_acme_data_sources_282ebac3_gmail_send_email__first_contact"]) {
       resolveAs = (t) => t;
       assert.ok(name.length >= 49 && name.length <= 63);
       assert.equal((await router.resolve(app(), "notes_tools", name)).tool, name, `${name.length} chars`);
