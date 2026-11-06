@@ -44,7 +44,7 @@ describe("QA-BRIDGE22: provider keys in their own namespace, percent errors, zdr
     return { status: r.status, json: JSON.parse((await r.text()) || "null") };
   };
   /** the app key's section of the page: its tag */
-  const appKeyTag = (html: string, name: string) => new RegExp(`<h2 id="k-${name}">[\\s\\S]*?</h2><span class="tb-tag [a-z-]+"><span class="tb-ink">([^<]+)</span>`).exec(html)?.[1];
+  const appKeyTag = (html: string, name: string) => new RegExp(`<h3 id="k-${name}">[\\s\\S]*?</h3><span class="tb-tag [a-z-]+"><span class="tb-ink">([^<]+)</span>`).exec(html)?.[1];
 
   before(async () => {
     w = await makeWorld({ real: true });
@@ -76,7 +76,8 @@ describe("QA-BRIDGE22: provider keys in their own namespace, percent errors, zdr
     const html = await open();
     assert.equal(appKeyTag(html, "OPENAI_API_KEY"), "Not set", "the app key is not set");
     assert.equal(buildStatusReport(w.bridge.ctx).keys.find((k) => k.name === "OPENAI_API_KEY")?.set, false, "StatusReport.keys[] says not set (RM-25)");
-    assert.match(html, /<h3 id="pk-0">OPENAI_API_KEY<\/h3>/, "the provider key shows in its own section");
+    // spec 0.1.92: the older named key shows under its provider (OpenAI), never as the app key
+    assert.match(html, /Found an existing OpenAI key in: older key &quot;OPENAI_API_KEY&quot; \(reasoning \(Notes\)\)/, "the named key shows under its provider");
     // the role still gets the provider key it is bound to
     assert.equal((await internal("/tb/v1/model-roles/reasoning")).json.key, "sk-provider-qa22");
     // an app key entered under that name is a different key; each answers only its own path
@@ -193,9 +194,9 @@ describe("QA-BRIDGE22: a key store of the released bridge 0.2.7 loads unchanged"
     const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 120, jti: w.api.ulid(), ws: WS, pur: "keys" });
     const html = await (await fetch(`${w.keysUrl}/keys`, { method: "POST", headers: FORM, body: new URLSearchParams({ ticket }), redirect: "manual" })).text();
     for (const name of ["OPENAI_API_KEY", "NOTES_API_KEY"]) {
-      assert.equal(new RegExp(`<h2 id="k-${name}">[\\s\\S]*?</h2><span class="tb-tag [a-z-]+"><span class="tb-ink">([^<]+)</span>`).exec(html)?.[1], "Set", name);
+      assert.equal(new RegExp(`<h3 id="k-${name}">[\\s\\S]*?</h3><span class="tb-tag [a-z-]+"><span class="tb-ink">([^<]+)</span>`).exec(html)?.[1], "Set", name);
     }
-    assert.doesNotMatch(html, /<h3 id="pk-/, "no provider keys");
+    assert.doesNotMatch(html, /older key|Found an existing/, "no provider keys");
     // an app key never satisfies a role binding: the role is unset
     assert.equal(buildStatusReport(w.bridge.ctx).roles?.find((r) => r.role === "reasoning")?.set, false);
   });

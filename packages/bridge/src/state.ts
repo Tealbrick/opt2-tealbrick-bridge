@@ -17,7 +17,7 @@ import { join } from "node:path";
 import type { Kek, ManifestApi } from "@opt2-tealbrick/relay";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, InstanceId, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { DataPolicy, ModelRole } from "@opt2-tealbrick/spec/models";
+import { type DataPolicy, MODEL_PROVIDERS, type ModelRole } from "@opt2-tealbrick/spec/models";
 import type { Ed25519KeyPair, PinnedKeySet } from "@opt2-tealbrick/spec/sdk";
 
 const isPinned = (v: unknown): v is PinnedKeySet =>
@@ -71,6 +71,11 @@ export interface KeyStore {
    * exactly (`keyName`).
    */
   values: Record<string, string>;
+  /**
+   * v0.2.16 (spec 0.1.92 item 7): provider-linked requirement names the owner keeps as their own value (never mirrored).
+   * Absent = none. A bridge before 0.2.16 keeps this member when it rewrites the record (it writes the whole object).
+   */
+  overrides?: string[];
 }
 
 /** S3 namespace of owner-named provider keys (QA-BRIDGE22-1) */
@@ -86,8 +91,8 @@ export interface ModelBinding {
   provider: string;
   model: string;
   baseUrl?: string;
-  /** a name in S3 (`KeyStore.values`): `pk:<label>` of a provider key, or the requirement name of an app key the owner
-   *  chose; absent for a provider with `keyNeeded: false` or when the key was deleted */
+  /** a name in S3 (`KeyStore.values`): `pk:@<provider>` (the provider key, spec 0.1.92) or `pk:<label>` of an older named
+   *  key; absent = the provider key of `provider` (0.2.16), or a provider with `keyNeeded: false` */
   keyName?: string;
   dataPolicy: DataPolicy;
   /** ISO time of the owner's zero-data-retention tick (`zdr` only) */
@@ -373,23 +378,58 @@ export class BridgeState {
   }
 
   /**
-   * Sets or deletes one key: a requirement name, or {@link providerKeyName} of an owner-named provider key. Deleting a
-   * key that bindings use leaves those bindings without a key (BRIDGE §15.2) in the same revision: one `keysRev` bump for
-   * the whole change.
+   * Sets or deletes one key: a requirement name, or {@link providerKeyName} of a provider key. Deleting a key that bindings
+   * name (spec 0.1.92 item 6): their `keyName` becomes the provider key of their provider (`pk:@<id>`; a provider without
+   * keys: removed), so they use that key from now on and an older bridge still resolves them. One `keysRev` bump for the
+   * whole change.
    */
   setKey(name: string, value: string | null): void {
-    if (value === null) delete this.keyStore.values[name];
-    else this.keyStore.values[name] = value;
-    const served = value === null && this.bindings.some((b) => b.keyName === name);
-    if (served)
-      this.saveBindings(
-        this.bindings.map((b) => {
-          if (b.keyName !== name) return b;
-          const { keyName: _k, ...unset } = b;
-          return unset;
-        }),
-      );
+    this.commitKeys({ [name]: value });
+  }
+
+  /**
+   * Several S3 changes as ONE revision (spec 0.1.92 "Save for all apps"): values (null = delete), optionally the new
+   * `overrides` list and the new bindings. Bindings that name a deleted older key move to their provider key (setKey).
+   */
+  commitKeys(changes: Record<string, string | null>, next: { overrides?: string[]; bindings?: ModelBinding[] } = {}): void {
+    for (const [name, value] of Object.entries(changes)) {
+      if (value === null) delete this.keyStore.values[name];
+      else this.keyStore.values[name] = value;
+    }
+    if (next.overrides) {
+      if (next.overrides.length) this.keyStore.overrides = [...new Set(next.overrides)].sort();
+      else delete this.keyStore.overrides;
+    }
+    const deleted = new Set(Object.entries(changes).filter(([, v]) => v === null).map(([k]) => k));
+    let bindings = next.bindings ?? this.bindings;
+    // a deleted provider key (`pk:@…`) keeps the bindings that name it (they resolve again once it is set)
+    if (bindings.some((b) => b.keyName && deleted.has(b.keyName) && !b.keyName.startsWith("pk:@")))
+      bindings = bindings.map((b) => {
+        if (!b.keyName || !deleted.has(b.keyName) || b.keyName.startsWith("pk:@")) return b;
+        const { keyName: _k, ...rest } = b;
+        return MODEL_PROVIDERS.find((p) => p.id === b.provider)?.keyNeeded ? { ...rest, keyName: `pk:@${b.provider}` } : rest;
+      });
+    const unnamed = bindings.some((b) => !b.keyName && MODEL_PROVIDERS.find((p) => p.id === b.provider)?.keyNeeded);
+    if (bindings !== this.bindings || unnamed) this.saveBindings(bindings);
     else this.bumpKeys();
+  }
+
+  /** spec 0.1.92 item 7: the override list alone changes no served value, so no `keysRev` bump */
+  saveOverrides(list: string[]): void {
+    if (list.length) this.keyStore.overrides = [...new Set(list)].sort();
+    else delete this.keyStore.overrides;
+    this.saveKeyStore();
+  }
+
+  /** spec 0.1.92 item 5b: mirrors into UNSET names; the served values do not change, so no `keysRev` bump */
+  fillKeys(values: Record<string, string>): void {
+    let changed = false;
+    for (const [name, value] of Object.entries(values)) {
+      if (Object.hasOwn(this.keyStore.values, name)) continue;
+      this.keyStore.values[name] = value;
+      changed = true;
+    }
+    if (changed) this.saveKeyStore();
   }
 
   /** Replaces the S11 bindings (BRIDGE §15.1); bumps `keysRev` once. */
@@ -402,7 +442,10 @@ export class BridgeState {
     this.saveModels(this.bindings, next);
   }
 
-  private saveModels(bindings: ModelBinding[], ownHosts: string[]): void {
+  private saveModels(input: ModelBinding[], ownHosts: string[]): void {
+    // spec 0.1.92 item 6: a binding of a keyNeeded provider names its key explicitly (`pk:@<provider>` when absent), so an
+    // older bridge resolves it after a rollback; done on owner writes only, never at boot
+    const bindings = input.map((b) => (!b.keyName && MODEL_PROVIDERS.find((p) => p.id === b.provider)?.keyNeeded ? { ...b, keyName: `pk:@${b.provider}` } : b));
     const rev = this.keyStore.keysRev + 1;
     this.writeRecord("models", { rev, bindings, ...(ownHosts.length ? { ownHosts } : {}) } satisfies ModelsRecord);
     this.bindings = bindings;

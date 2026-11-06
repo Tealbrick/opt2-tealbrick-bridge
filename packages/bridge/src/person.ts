@@ -12,8 +12,9 @@ import { connect as netConnect, type Socket } from "node:net";
 import { isRefusal } from "@opt2-tealbrick/relay";
 import { LIFETIME_S, type PersonTicketKeysClaims, type PersonTicketLaunchClaims, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { BridgeContext } from "./context.ts";
-import { applyModelsPost, confirmPage, deleteQuestion, hintsFrom, type RoleHint, renderModels, renderOwnHosts, renderProviderKeys, servesText } from "./models-page.ts";
+import { appKeyChange, applyModelsPost, confirmPage, deleteQuestion, hintsFrom, KEYS_CSS, KEYS_SCRIPT, type RoleHint, renderDefaults, renderOlderKeys, renderOverrides, renderOwnHosts, renderProviders } from "./models-page.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
+import { keyNames } from "./provider-keys.ts";
 import { type AppRuntime, keyRequirements } from "./table.ts";
 import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson, urlOf } from "./util.ts";
 
@@ -301,13 +302,14 @@ export class PersonSurfaces {
         const label = keyRequirements(t).find((k) => k.name === name)?.label ?? name;
         const q = form.get("confirm") === "1" ? undefined : deleteQuestion(this.ctx, t, name, label, { name, action: "delete" });
         if (q?.kind === "confirm") return confirmPage(res, this.ctx, session.csrf, q);
-        this.ctx.state.setKey(name, null);
+        appKeyChange(this.ctx, t, name, null);
       } else {
         // a pasted key often carries a trailing newline or spaces: only the surrounding whitespace is removed
         const value = (form.get("value") ?? "").trim();
         if (!value) return refuse("empty_value", name, 400, notSaved("enter a value."));
         if (Buffer.byteLength(value) > 16 * 1024) return refuse("too_large", name, 400, notSaved("the value is too large (at most 16 KB)."));
-        this.ctx.state.setKey(name, value);
+        // spec 0.1.92 item 7: a provider-linked name becomes an override for the apps that declare it
+        appKeyChange(this.ctx, t, name, value);
         session.saved = name; // the success notice on the next view (BRIDGE-PAGES #3a): shown once, nothing in the URL
         this.ctx.log.info("bridge.keys.saved", { app: keyApps(t, name), keyName: name, keysRev: this.ctx.state.keyStore.keysRev });
       }
@@ -327,59 +329,60 @@ export class PersonSurfaces {
   }
 
   private renderKeys(res: ServerResponse, t: NonNullable<BridgeContext["table"]>, session: KeySession, headers: Record<string, string> = {}): void {
-    const reqs = keyRequirements(t).filter((k) => k.source === "account_default");
-    const byName = new Map<string, { label: string; provider?: string; products: Set<string>; required: boolean }>();
-    for (const k of reqs) {
-      const e = byName.get(k.name) ?? { label: k.label, ...(k.provider ? { provider: k.provider } : {}), products: new Set<string>(), required: false };
-      e.products.add(k.product);
-      e.required ||= k.required;
-      byName.set(k.name, e);
-    }
-    const names = [...byName.keys()].sort((a, b) => Number(session.req.includes(b)) - Number(session.req.includes(a)) || a.localeCompare(b));
+    const all = keyNames(t);
+    // spec 0.1.92 item 11 (4): plain app keys only; provider-linked names are shown under their provider and in Overrides
+    const plain = all.filter((k) => !k.provider).sort((a, b) => Number(session.req.includes(b.name)) - Number(session.req.includes(a.name)) || a.name.localeCompare(b.name));
     const apps = new Map<string, PageApp>();
     const hidden = (n: string) => `<input type="hidden" name="csrf" value="${esc(session.csrf)}"><input type="hidden" name="name" value="${esc(n)}">`;
-    const rows = names
-      .map((n) => {
-        const e = byName.get(n) as { label: string; provider?: string; products: Set<string>; required: boolean };
+    const rows = plain
+      .map((e) => {
+        const n = e.name;
         const set = Object.hasOwn(this.ctx.state.keyStore.values, n);
         const id = esc(n);
-        const chips = [...e.products]
+        const chips = e.products
           .map((p) => {
             const a = apps.get(p) ?? pageApp(this.ctx, p);
             apps.set(p, a);
             return appChip(a);
           })
           .join("");
+        const scope = [...new Set(e.products.map((p) => (apps.get(p) as PageApp).name))].sort().join(", ");
         const tag = set ? `<span class="tb-tag live">${ink("Set")}</span>` : e.required ? `<span class="tb-tag needs-you">${ink("Not set")}</span>` : `<span class="tb-tag idle">${ink("Not set")}</span>`;
-        const serves = servesText(this.ctx, t, n);
         return `
   <section class="bp-key" aria-labelledby="k-${id}">
-    <div class="bp-key-head"><h2 id="k-${id}">${esc(e.label)}${e.required ? "" : " <small>(optional)</small>"}</h2>${tag}</div>
-    <div class="bp-used"><span class="tb-mono">${id}</span><span>used by</span>${chips}${session.req.includes(n) ? `<span class="tb-tag busy">${ink("requested now")}</span>` : ""}</div>${serves ? `\n    <div class="bp-used"><span>Serves:</span><span>${esc(serves)}</span></div>` : ""}
-    <div class="bp-form"><form class="bp-form-del" method="post" action="/keys">${hidden(n)}<label class="tb-sr" for="v-${id}">${esc(e.label)}</label><input class="tb-input" id="v-${id}" name="value" type="password" autocomplete="off" required placeholder="${set ? "Replace value" : "Enter value"}"><button class="tb-btn${set ? "" : " primary"}" type="submit">${ink(set ? "Replace" : "Save")}</button></form>${set ? `<form class="bp-form-del" method="post" action="/keys">${hidden(n)}<input type="hidden" name="action" value="delete"><button class="tb-btn danger" type="submit">${ink("Delete")}</button></form>` : ""}</div>
+    <div class="bp-key-head"><h3 id="k-${id}">${esc(e.label)}${e.required ? "" : " <small>(optional)</small>"}</h3>${tag}</div>
+    <div class="bp-used"><span class="tb-mono">${id}</span><span>used by</span>${chips}${session.req.includes(n) ? `<span class="tb-tag busy">${ink("requested now")}</span>` : ""}</div>
+    <div class="bp-form"><form class="bp-form-del" method="post" action="/keys">${hidden(n)}<label class="tb-sr" for="v-${id}">${esc(e.label)}</label><input class="tb-input" id="v-${id}" name="value" type="password" autocomplete="off" required placeholder="${set ? "Replace value" : "Enter value"}"><button class="tb-btn${set ? "" : " primary"}" type="submit">${ink(`${set ? "Replace" : "Save"} for ${scope}`)}</button></form>${set ? `<form class="bp-form-del" method="post" action="/keys">${hidden(n)}<input type="hidden" name="action" value="delete"><button class="tb-btn danger" type="submit">${ink("Delete")}</button></form>` : ""}</div>
   </section>`;
       })
       .join("");
     // the one-time success notice: the key's label from the table (the name the form sent was checked against it)
-    const savedLabel = session.saved ? byName.get(session.saved)?.label : undefined;
-    const notice = savedLabel ? `Saved ${savedLabel}.` : session.flash;
+    const savedKey = session.saved ? all.find((k) => k.name === session.saved) : undefined;
+    const savedScope = savedKey ? [...new Set(savedKey.products.map((p) => pageApp(this.ctx, p).name))].sort().join(", ") : "";
+    const notice = savedKey ? `Saved ${savedKey.label} for ${savedScope}${savedKey.provider ? " only" : ""}.` : session.flash;
     delete session.saved;
     delete session.flash;
     const flash = notice ? `\n    <div class="tb-notice live" role="status"><span><strong>${esc(notice)}</strong> Apps that use it pick it up within a minute.</span></div>` : "";
-    const models = renderModels(this.ctx, t, session.csrf, session.hints, apps);
+    const defaults = renderDefaults(this.ctx, t, session.csrf, session.hints, apps);
+    const overrides = renderOverrides(this.ctx, t, session.csrf);
     htmlPage(res, 200, {
       title: "Keys and models",
       workspace: t.config.workspace.name,
       apps: [...apps.values()],
       headers,
+      css: KEYS_CSS,
+      script: KEYS_SCRIPT,
       main: `
   <section class="bp-card wide" aria-labelledby="h">
     <h1 id="h">Keys and models</h1>
-    <p class="tb-soft">Keys are stored in your workspace only. Tealbrick Portal never sees them, and values are never shown again.</p>${flash}
-    <h2>App keys</h2>
-    ${rows ? `<div class="bp-keys">${rows}\n    </div>` : '<p class="tb-soft">No app needs a key.</p>'}
+    <p class="tb-soft">Enter a provider's key once and every app that needs it gets it. Then choose the models, and change them for one app only where you want. Keys are stored in your workspace only: Tealbrick Portal never sees them, and values are never shown again.</p>${flash}
     <p class="tb-hint">This page closes its session after ${LIFETIME_S.keyPageSession / 60} minutes. Open it again from Portal when it expires.</p>
-  </section>${renderProviderKeys(this.ctx, t, session.csrf)}${models}${models ? renderOwnHosts(this.ctx, session.csrf) : ""}`,
+  </section>${renderProviders(this.ctx, t, session.csrf)}${defaults}${overrides}
+  <section class="bp-card wide" aria-labelledby="h-ak">
+    <h2 id="h-ak">4 · Other app keys</h2>
+    <p class="tb-soft">Keys for services that are not AI models. Each one is used only by the apps listed.</p>
+    ${rows ? `<div class="bp-keys">${rows}\n    </div>` : '<p class="tb-soft">No app needs another key.</p>'}
+  </section>${renderOlderKeys(this.ctx, t, session.csrf)}${defaults ? renderOwnHosts(this.ctx, session.csrf) : ""}`,
     });
   }
 }

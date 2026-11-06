@@ -13,6 +13,7 @@ import { PERSONA_MAX_CHARS, PERSONA_PATTERN } from "@opt2-tealbrick/spec/models"
 import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { EventStore } from "./events.ts";
 import { ProofCaps } from "./proof-caps.ts";
+import { mirrorFills } from "./provider-keys.ts";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -212,6 +213,10 @@ export class BridgeContext extends EventEmitter {
       const problem = typeof a.persona === "string" ? personaProblem(a.persona) : undefined;
       if (problem) this.reject({ kind: "config", code: problem, detail: `agent ${a.agt}: ${(a.persona as string).length} units` });
     }
+    // spec 0.1.92 item 5b: an unset provider-linked name (an app installed later) gets the provider key's value written
+    // under its own name (a rollback serves it); the served value does not change, so no keysRev bump
+    const fills = mirrorFills(this.state, next);
+    if (Object.keys(fills).length) this.state.fillKeys(fills);
     this.emit("table", next, prev);
   }
 }

@@ -9,7 +9,8 @@ import type { ModelRoleFetchResponse, ModelRoleRequirementEntry, ModelRoleStatus
 import type { InstanceId } from "@opt2-tealbrick/spec/credentials";
 import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_PROVIDERS, MODEL_ROLES, type ModelProvider, type ModelRole, NEVER_LOCAL_HOSTNAMES, type PolicyBasis } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
-import { isProviderKeyName, type ModelBinding } from "./state.ts";
+import { bindingKeyName } from "./provider-keys.ts";
+import type { ModelBinding } from "./state.ts";
 import type { Table } from "./table.ts";
 import { BridgeError } from "./util.ts";
 
@@ -213,7 +214,9 @@ export function boundKey(b: ModelBinding, values: Readonly<Record<string, string
   const p = providerById(b.provider);
   if (!p) return undefined;
   if (!p.keyNeeded) return null;
-  return b.keyName && isProviderKeyName(b.keyName) && Object.hasOwn(values, b.keyName) ? values[b.keyName] : undefined;
+  // spec 0.1.92 item 6: `keyName` absent = the provider key; `pk:@<other provider>` never resolves
+  const name = bindingKeyName(b);
+  return name && Object.hasOwn(values, name) ? values[name] : undefined;
 }
 
 /**
