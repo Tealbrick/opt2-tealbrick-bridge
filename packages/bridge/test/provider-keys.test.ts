@@ -225,7 +225,15 @@ describe("one key per provider: page, resolve, mirrors, conflicts (PK-1..PK-6)",
     let html = await page();
     assert.match(html, /These OpenAI keys differ\./);
     assert.match(html, /<strong>Value 1<\/strong> <span class="tb-tag needs-you">differs<\/span>: OPENAI_API_KEY/);
-    assert.match(html, /OPENAI_API_KEY<\/strong> <span class="tb-tag idle"><span class="tb-ink">Own value, not shared yet/, "no provider key yet: not a conflict tag");
+    assert.match(html, /OPENAI_API_KEY<\/strong> <span class="tb-tag needs-you"><span class="tb-ink">Differs/, "two differing values and no provider key: still a conflict");
+    // one value only and no provider key (the first view after the update): not shared yet, offered for all apps
+    const named = values()["pk:OpenAI main"] as string;
+    st().commitKeys({ "pk:OpenAI main": values().OPENAI_API_KEY as string });
+    const one = await page();
+    assert.match(one, /OPENAI_API_KEY<\/strong> <span class="tb-tag idle"><span class="tb-ink">Own value, not shared yet/);
+    assert.match(one, /name="action" value="prov_adopt"><input type="hidden" name="provider" value="openai"><input type="hidden" name="from" value="OPENAI_API_KEY"><button class="tb-btn primary" type="submit"><span class="tb-ink">Use it for all OpenAI apps/);
+    noLeak(one);
+    st().commitKeys({ "pk:OpenAI main": named });
     assert.match(html, /<strong>Value 2<\/strong> <span class="tb-tag needs-you">differs<\/span>: older key &quot;OpenAI main&quot;/);
     noLeak(html);
     const rev = st().keyStore.keysRev;

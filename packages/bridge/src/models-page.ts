@@ -402,16 +402,18 @@ function linkedRows(ctx: BridgeContext, t: Table, csrf: string, product: string)
       const st = linkState(ctx.state, t, k) as Exclude<LinkState, "own">;
       const apps = appsText(ctx, k.products);
       const slotSet = hasValue(ctx, providerSlot(p.id));
+      // ONE stored value and no provider key yet: not a conflict (two or more values stay "Differs", item 8)
+      const unshared = !slotSet && st === "differs" && valueGroups(ctx.state, t, p.id).length === 1;
       // no provider key yet: an app's own value is "not shared yet" (the provider row offers it for all apps), not a conflict
-      const text = st === "follows" ? (slotSet ? `Follows the ${p.label} key` : `Waits for the ${p.label} key`) : st === "override" ? "Override" : slotSet ? "Differs" : "Own value, not shared yet";
+      const text = st === "follows" ? (slotSet ? `Follows the ${p.label} key` : `Waits for the ${p.label} key`) : st === "override" ? "Override" : unshared ? "Own value, not shared yet" : "Differs";
       const id = `ak-${product}-${k.name}`;
       const actions = [
         st !== "follows" && slotSet ? postForm(csrf, { action: "akey_follow", name: k.name }, `Use the ${p.label} key`) : "",
-        st === "differs" && !slotSet ? postForm(csrf, { action: "prov_adopt", provider: p.id, from: k.name }, `Use it for all ${p.label} apps`, "tb-btn primary") : "",
+        unshared ? postForm(csrf, { action: "prov_adopt", provider: p.id, from: k.name }, `Use it for all ${p.label} apps`, "tb-btn primary") : "",
         st === "differs" ? postForm(csrf, { action: "akey_keep", name: k.name }, "Keep as an override") : "",
       ].join("");
       return `
-      <li><strong class="tb-mono">${esc(k.name)}</strong> <span class="tb-tag ${!slotSet && st !== "override" ? "idle" : LINK_TAG[st]}">${ink(text)}</span>${actions ? `<div class="bp-form">${actions}</div>` : ""}
+      <li><strong class="tb-mono">${esc(k.name)}</strong> <span class="tb-tag ${unshared || (st === "follows" && !slotSet) ? "idle" : LINK_TAG[st]}">${ink(text)}</span>${actions ? `<div class="bp-form">${actions}</div>` : ""}
         <details${st === "override" ? " open" : ""}><summary>${esc(st === "override" ? `Replace the key for ${apps}` : `Use a different key for ${apps} only`)}</summary>
         <form class="bp-form" method="post" action="/keys">${hidden({ csrf, name: k.name })}<label class="tb-sr" for="${esc(id)}">${esc(k.label)}</label><input class="tb-input" id="${esc(id)}" name="value" type="password" autocomplete="off" required placeholder="Enter a key for ${esc(apps)} only"><button class="tb-btn" type="submit">${ink(`Save for ${apps} only`)}</button></form></details></li>`;
     })
