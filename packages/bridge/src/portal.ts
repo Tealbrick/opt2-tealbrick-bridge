@@ -12,6 +12,7 @@ import type { Json } from "@opt2-tealbrick/spec/sdk";
 import { bridgeCaps, missingBridgeCap } from "./caps.ts";
 import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { roleStatuses } from "./model-roles.ts";
+import { resolveAppKey } from "./provider-keys.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { acceptedDigests, buildTable, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
@@ -536,7 +537,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
   });
   const keys = (t ? keyRequirements(t) : [])
     .filter((k) => k.source === "account_default")
-    .map((k) => ({ name: k.name, ins: k.ins, set: Object.hasOwn(ctx.state.keyStore.values, k.name) }));
+    .map((k) => ({ name: k.name, ins: k.ins, set: resolveAppKey(ctx.state, t, k.name) !== undefined }));
   const connectionsCreated = [...ctx.state.connections.values()]
     .filter((r) => !r.reported)
     .map((r) => {

@@ -2,6 +2,15 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.16 — one key per provider on the key page (spec 0.1.92, Martin 2026-11-06)
+
+- **Enter a key once.** The "Keys and models" page starts with one row per provider. "Save for all apps" stores the key as `pk:@<provider>`. Every app key whose manifest names that provider (e.g. Knowledge `OPENAI_API_KEY`, provider "OpenAI") and every model that uses the provider gets it, also apps added later. `getKey` and `modelRole` behave the same for apps.
+- **Then override for one app.** Defaults per role, then Overrides per app and role ("Save for Knowledge · Dreaming only", "Use the workspace default"), and per-app linked keys (follow / override). Other app keys (e.g. `COMPOSIO_API_KEY`) keep one value per name, with the apps named on the button.
+- **Nothing is picked silently.** Differing stored values for one provider are shown as Value 1 / Value 2 "differs" (values never shown); the owner chooses. No stored value is rewritten at boot.
+- **Rollback to 0.2.15 is safe.** Values that follow a provider key are also stored under their own names, bindings name `pk:@<provider>` explicitly, and `KeyStore.overrides[]` survives an older bridge's writes. Apps added after the provider key was saved get a mirror when the config arrives.
+- The page carries one nonce'd script (shows and hides fields, follows the system dark mode); every form works without it.
+- Spec pin stays 0.1.78; `provider-keys.ts` holds a marked local copy of the 0.1.92 names. Tests: `provider-keys.test.ts` (PK-1..PK-6); key-page tests updated for the new layout.
+
 ## 0.2.15 — a first contact through a long tool name (manifest 0.1.37, C383, D-C383-JM1)
 
 - **A dynamic call may name up to 63 characters.** Input validation pins manifest 0.1.37, so `{tool, arguments}` takes the rule the resolver already had (spec `DYNAMIC_TOOL_NAME_RE`, BRIDGE v0.1.68): a catalog name (at most 48) or a variant the agent requests, such as `<tool>__first_contact`. Before, a name over 48 was refused `input_invalid` after resolve, so no hold was made for a tool with a name over 33 characters.

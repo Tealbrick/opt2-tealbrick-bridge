@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
 import { after, before, describe, test } from "node:test";
+import { KEYS_CSS } from "../src/models-page.ts";
 import { appColor, NEUTRAL_APP_COLOR, PAGE_CSS, PAGE_CSS_HASH } from "../src/pages.ts";
 import { BRG, makeWorld, type World, WS } from "./support/world.ts";
 
@@ -83,7 +84,7 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
     assert.equal(open.status, 200);
     cookie = String(open.headers.get("set-cookie")).split(";")[0] as string;
     const html = await open.text();
-    checkPage(open, html);
+    checkPage(open, html, { script: true }); // spec 0.1.92 item 12: the key page's one nonce'd script
     csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
     assert.ok(csrf);
   });
@@ -97,8 +98,8 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
   test("CSP: exact directives, hash = the inlined CSS, a new nonce per response, no 'unsafe-inline'", async () => {
     const a = await keysGet();
     const b = await keysGet();
-    const na = checkPage(a, await a.text());
-    const nb = checkPage(b, await b.text());
+    const na = checkPage(a, await a.text(), { script: true });
+    const nb = checkPage(b, await b.text(), { script: true });
     assert.notEqual(na, nb, "the nonce changes per response");
     assert.equal(directives(a.headers.get("content-security-policy")).get("form-action"), "'self'");
     // the hash is computed from the shipped asset, never a hand-copied string
@@ -217,8 +218,8 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
     assert.equal(r.headers.get("location"), "/keys", "no marker in the URL");
     const first = await keysGet();
     const html = await first.text();
-    checkPage(first, html);
-    assert.match(html, /<div class="tb-notice live" role="status"><span><strong>Saved Notes key\.<\/strong> Apps that use it pick it up within a minute\.<\/span><\/div>/);
+    checkPage(first, html, { script: true });
+    assert.match(html, /<div class="tb-notice live" role="status"><span><strong>Saved Notes key for Notes\.<\/strong> Apps that use it pick it up within a minute\.<\/span><\/div>/);
     assert.ok(!html.includes(value), "the value is never shown");
     assert.match(html, /<span class="tb-tag live"><span class="tb-ink">Set<\/span><\/span>/);
     const second = await (await keysGet()).text();
@@ -236,9 +237,9 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
   test("the key page shows apps by name with their colour in the nonce'd block; Open Portal = TB_PORTAL_URL only", async () => {
     const r = await keysGet();
     const html = await r.text();
-    const nonce = checkPage(r, html);
+    const nonce = checkPage(r, html, { script: true });
     assert.match(html, /<span class="bp-app bp-a-notes">Notes<\/span>/, "the production name, not the product id");
-    assert.ok(html.includes(`<style nonce="${nonce}">.bp-a-notes{--app:${NEUTRAL_APP_COLOR}}</style>`), "an app without a kit colour gets the neutral");
+    assert.ok(html.includes(`<style nonce="${nonce}">.bp-a-notes{--app:${NEUTRAL_APP_COLOR}}${KEYS_CSS}</style>`), "an app without a kit colour gets the neutral");
     // launch link expired: the app band + "Open <app> from Portal" to the configured Portal, whatever the request says
     const l = await fetch(`${w.publicUrl}/a/notes/tb/launch?next=https://evil.example`, { method: "POST", headers: { ...FORM, referer: "https://evil.example/" }, body: new URLSearchParams({ ticket: "x.y.z" }) });
     assert.equal(l.status, 401);

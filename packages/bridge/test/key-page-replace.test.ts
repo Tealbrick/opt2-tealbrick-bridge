@@ -34,7 +34,7 @@ describe("key page: replace a key that is already set", () => {
   test("empty key: the form says 'Enter value' / Save, tag Not set", async () => {
     const s = await open();
     assert.match(s.page, /placeholder="Enter value"/);
-    assert.match(s.page, />\s*Save\s*</);
+    assert.match(s.page, />\s*Save for Notes\s*</);
     assert.ok(!Object.hasOwn(store().values, NAME));
   });
 
@@ -46,7 +46,7 @@ describe("key page: replace a key that is already set", () => {
 
     const second = await open(); // a later visit (a new ticket), the key is already set
     assert.match(second.page, /placeholder="Replace value"/);
-    assert.match(second.page, />\s*Replace\s*</);
+    assert.match(second.page, />\s*Replace for Notes\s*</);
     assert.match(second.page, /value="delete"/, "Delete stays available");
     assert.match(second.page, /tb-tag live[\s\S]{0,80}Set/);
     assert.ok(!second.page.includes("sk-old-111"), "the stored value is never rendered");

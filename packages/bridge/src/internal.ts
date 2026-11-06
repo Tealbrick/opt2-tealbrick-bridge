@@ -20,6 +20,7 @@ import { EventIngestLimit, type EventStore, EventStoreFull } from "./events.ts";
 import { resolveForCaller } from "./model-roles.ts";
 import { OWNER_DRAFT_ROUTES, readOwnerDraftBody, relayOwnerDraft } from "./owner-drafts.ts";
 import { fetchManifestFrom } from "./portal.ts";
+import { resolveAppKey } from "./provider-keys.ts";
 import { refreshScopeSummary } from "./scope-summary.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, acceptedDigests, grantKey, insRef, internalUrlAllowed, keyRequirements, type Table } from "./table.ts";
@@ -355,7 +356,8 @@ export class InternalApi {
     // mid-deploy (app down or its manifest not loaded): a key the next revision adds may not be listed yet → transient
     if (!declared && (app.down || !app.manifest)) throw new BridgeError("app_unavailable", 503, "the app is updating; retry");
     if (!declared) throw new BridgeError("key_not_declared", 403);
-    const value = this.ctx.state.keyStore.values[name];
+    // spec 0.1.92 item 4: a provider-linked name falls back to the provider key
+    const value = resolveAppKey(this.ctx.state, t, name);
     if (value === undefined) throw new BridgeError("key_not_set", 404);
     const out: KeyFetchResponse = { name, value, keysRev: this.ctx.state.keyStore.keysRev };
     sendJson(res, 200, out);

@@ -6,7 +6,7 @@
  * components subset + bp-* layout, minified), copied verbatim. It is inlined as the first <style>; its sha256 is
  * computed here from the same bytes and put in the CSP, so the two can never differ. App colours go in one short
  * per-response <style> under a per-response nonce. No 'unsafe-inline', no style="" attributes, no script except the
- * nonce'd auto-submit. Font, mark and favicon are served by the bridge itself under /_tb/ (exact allowlist).
+ * nonce'd auto-submit and the key page's one nonce'd script (spec 0.1.92 item 12). Font, mark and favicon are served by the bridge itself under /_tb/ (exact allowlist).
  * Provenance of assets/: bridge-pages.css + nunito-latin-wght-normal.woff2 + OFL.txt from the design kit
  * (coordination/design/bridge, Nunito from @opt2-tealbrick/ui 0.2.4, OFL 1.1); mark.png = the drawn brand mark
  * (logo-mark@3x.png) and favicon.png = the production favicon (logo-32.png), both from coordination/design/assets/brand.
@@ -138,6 +138,8 @@ export interface PageSpec {
   script?: string;
   /** CSP form-action (default 'self') */
   formAction?: string;
+  /** trusted page CSS added to the nonce'd <style> (after the app colours) */
+  css?: string;
 }
 
 /** CSP of an HTML page; exported for the tests */
@@ -180,7 +182,7 @@ export function htmlPage(res: ServerResponse, status: number, p: PageSpec): void
 <title>${esc(p.title)} · Tealbrick</title>
 <link rel="icon" href="/_tb/favicon.png" type="image/png">
 <style>${PAGE_CSS}</style>
-<style nonce="${nonce}">${appCss}</style>
+<style nonce="${nonce}">${appCss}${p.css ?? ""}</style>
 </head>
 <body class="tb-root">
 <div class="bp-page">
