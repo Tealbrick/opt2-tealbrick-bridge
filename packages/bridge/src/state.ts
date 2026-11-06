@@ -409,8 +409,16 @@ export class BridgeState {
         const { keyName: _k, ...rest } = b;
         return MODEL_PROVIDERS.find((p) => p.id === b.provider)?.keyNeeded ? { ...rest, keyName: `pk:@${b.provider}` } : rest;
       });
-    if (bindings !== this.bindings) this.saveBindings(bindings);
+    const unnamed = bindings.some((b) => !b.keyName && MODEL_PROVIDERS.find((p) => p.id === b.provider)?.keyNeeded);
+    if (bindings !== this.bindings || unnamed) this.saveBindings(bindings);
     else this.bumpKeys();
+  }
+
+  /** spec 0.1.92 item 7: the override list alone changes no served value, so no `keysRev` bump */
+  saveOverrides(list: string[]): void {
+    if (list.length) this.keyStore.overrides = [...new Set(list)].sort();
+    else delete this.keyStore.overrides;
+    this.saveKeyStore();
   }
 
   /** spec 0.1.92 item 5b: mirrors into UNSET names; the served values do not change, so no `keysRev` bump */
@@ -434,7 +442,10 @@ export class BridgeState {
     this.saveModels(this.bindings, next);
   }
 
-  private saveModels(bindings: ModelBinding[], ownHosts: string[]): void {
+  private saveModels(input: ModelBinding[], ownHosts: string[]): void {
+    // spec 0.1.92 item 6: a binding of a keyNeeded provider names its key explicitly (`pk:@<provider>` when absent), so an
+    // older bridge resolves it after a rollback; done on owner writes only, never at boot
+    const bindings = input.map((b) => (!b.keyName && MODEL_PROVIDERS.find((p) => p.id === b.provider)?.keyNeeded ? { ...b, keyName: `pk:@${b.provider}` } : b));
     const rev = this.keyStore.keysRev + 1;
     this.writeRecord("models", { rev, bindings, ...(ownHosts.length ? { ownHosts } : {}) } satisfies ModelsRecord);
     this.bindings = bindings;

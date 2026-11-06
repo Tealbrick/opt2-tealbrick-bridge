@@ -227,8 +227,8 @@ function conflictBlock(ctx: BridgeContext, t: Table, csrf: string, p: ModelProvi
       for (const s of g) {
         if (s.kind === "app" && !isSlot) {
           const apps = appsText(ctx, linkedNames(t, p.id).find((x) => x.name === s.ref)?.products ?? []);
-          if (slotSet) actions.push(postForm(csrf, { action: "akey_follow", name: s.ref }, `Use the ${p.label} key for ${s.ref}`));
-          actions.push(postForm(csrf, { action: "akey_keep", name: s.ref }, `Keep ${s.ref} as an override for ${apps}`));
+          if (slotSet) actions.push(postForm(csrf, { action: "akey_follow", name: s.ref }, `Use the ${p.label} key here`));
+          actions.push(postForm(csrf, { action: "akey_keep", name: s.ref }, `Keep as an override for ${apps}`));
         }
         if (s.kind === "named" && !isSlot && slotSet) actions.push(postForm(csrf, { action: "pkey_switch", provider: p.id, label: namedLabel(s.ref) }, `Switch these models to the ${p.label} key`));
       }
@@ -303,7 +303,7 @@ function bindingForm(ctx: BridgeContext, csrf: string, v: RoleView, id: string, 
   const opts = choices
     .map(
       (p) =>
-        `<option value="${esc(p.id)}"${p.id === chosen?.id ? " selected" : ""} data-keyline="${esc(keyLine(ctx, p))}" data-url="${p.defaultBaseUrl ? "0" : "1"}" data-zdr="${p.zdrOffered ? "1" : "0"}" data-key="${p.keyNeeded ? "1" : "0"}">${esc(p.label)}${p.keyNeeded ? "" : " (no key)"}${p.defaultBaseUrl ? "" : " (needs an address)"}</option>`,
+        `<option value="${esc(p.id)}"${p.id === chosen?.id ? " selected" : ""} data-line="${esc(keyLine(ctx, p))}" data-needsurl="${p.defaultBaseUrl ? "0" : "1"}" data-zdrok="${p.zdrOffered ? "1" : "0"}" data-needskey="${p.keyNeeded ? "1" : "0"}">${esc(p.label)}${p.keyNeeded ? "" : " (no key)"}${p.defaultBaseUrl ? "" : " (needs an address)"}</option>`,
     )
     .join("");
   const pol = (["", "local", "zdr", "standard"] as const)
@@ -399,15 +399,15 @@ function linkedRows(ctx: BridgeContext, t: Table, csrf: string, product: string)
       const p = k.provider as ModelProvider;
       const st = linkState(ctx.state, t, k) as Exclude<LinkState, "own">;
       const apps = appsText(ctx, k.products);
-      const text = st === "follows" ? `Follows the ${p.label} key` : st === "override" ? "Override" : "Differs";
       const slotSet = hasValue(ctx, providerSlot(p.id));
+      const text = st === "follows" ? (slotSet ? `Follows the ${p.label} key` : `Waits for the ${p.label} key`) : st === "override" ? "Override" : "Differs";
       const id = `ak-${product}-${k.name}`;
       const actions = [
         st !== "follows" && slotSet ? postForm(csrf, { action: "akey_follow", name: k.name }, `Use the ${p.label} key`) : "",
         st === "differs" ? postForm(csrf, { action: "akey_keep", name: k.name }, "Keep as an override") : "",
       ].join("");
       return `
-      <li><strong class="tb-mono">${esc(k.name)}</strong> <span class="tb-tag ${LINK_TAG[st]}">${ink(text)}</span>${actions ? `<div class="bp-form">${actions}</div>` : ""}
+      <li><strong class="tb-mono">${esc(k.name)}</strong> <span class="tb-tag ${st === "follows" && !slotSet ? "idle" : LINK_TAG[st]}">${ink(text)}</span>${actions ? `<div class="bp-form">${actions}</div>` : ""}
         <details${st === "override" ? " open" : ""}><summary>${esc(st === "override" ? `Replace the key for ${apps}` : `Use a different key for ${apps} only`)}</summary>
         <form class="bp-form" method="post" action="/keys">${hidden({ csrf, name: k.name })}<label class="tb-sr" for="${esc(id)}">${esc(k.label)}</label><input class="tb-input" id="${esc(id)}" name="value" type="password" autocomplete="off" required placeholder="Enter a key for ${esc(apps)} only"><button class="tb-btn" type="submit">${ink(`Save for ${apps} only`)}</button></form></details></li>`;
     })
@@ -490,17 +490,17 @@ export const KEYS_SCRIPT = `(function(){
   function each(sel, fn){ Array.prototype.forEach.call(document.querySelectorAll(sel), fn); }
   each("form[data-binding]", function(form){
     var sel = form.querySelector("select[data-provider]"); if (!sel) return;
-    var line = form.querySelector("[data-keyline]"), url = form.querySelector("[data-urlfield]"), show = form.querySelector("[data-showurl]");
-    var zdr = form.querySelector("[data-zdr]"), key = form.querySelector("[data-keyfield]");
+    var line = form.querySelector("p[data-keyline]"), url = form.querySelector("div[data-urlfield]"), show = form.querySelector("button[data-showurl]");
+    var zdr = form.querySelector("label[data-zdr]"), key = form.querySelector("div[data-keyfield]");
     var urlInput = url ? url.querySelector("input") : null, opened = false;
     function update(){
       var o = sel.options[sel.selectedIndex]; if (!o) return;
-      if (line) line.textContent = o.getAttribute("data-keyline") || "";
-      var needs = o.getAttribute("data-url") === "1";
+      if (line) line.textContent = o.getAttribute("data-line") || "";
+      var needs = o.getAttribute("data-needsurl") === "1";
       if (url) url.hidden = !(needs || opened || (urlInput && urlInput.value));
       if (show) show.hidden = !url || !url.hidden;
-      if (zdr) zdr.hidden = o.getAttribute("data-zdr") !== "1";
-      if (key) key.hidden = o.getAttribute("data-key") !== "1";
+      if (zdr) zdr.hidden = o.getAttribute("data-zdrok") !== "1";
+      if (key) key.hidden = o.getAttribute("data-needskey") !== "1";
     }
     if (show) show.addEventListener("click", function(){ opened = true; update(); if (urlInput) urlInput.focus(); });
     sel.addEventListener("change", update); update();
@@ -513,7 +513,10 @@ export const KEYS_SCRIPT = `(function(){
 })();`;
 
 /** page CSS in the nonce'd <style> (the kit already makes `[hidden]` win over its display rules) */
-export const KEYS_CSS = ".tb-list li{margin-block:.5rem}.tb-list details{margin-block-start:.25rem}";
+export const KEYS_CSS =
+  ".tb-list li{margin-block:.5rem}.tb-list details{margin-block-start:.25rem}" +
+  "form[data-binding]{display:grid;gap:12px;justify-items:start;margin-block:8px}form[data-binding]>.tb-field,form[data-binding]>details,form[data-binding] details .tb-field{width:100%;max-width:36rem}form[data-binding] .tb-input,form[data-binding] .tb-select-native{width:100%;box-sizing:border-box}form[data-binding] details{display:grid;gap:12px}" +
+  ".bp-main .tb-btn{white-space:normal;max-width:100%;height:auto;min-height:var(--tb-target)}.bp-main .tb-btn .tb-ink{white-space:normal}.tb-notice[role=group]{display:grid;gap:8px}.tb-notice[role=group] .bp-form{margin-block-start:4px}.bp-key .tb-list{padding-inline-start:0;list-style:none}";
 
 /** the "asks first" page (deleting a key that serves models): the same form again with confirm=1, or back */
 export function confirmPage(res: ServerResponse, ctx: Pick<BridgeContext, "table">, csrf: string, c: Extract<ModelsOutcome, { kind: "confirm" }>): void {
@@ -578,6 +581,8 @@ function saveProviderKey(ctx: BridgeContext, form: URLSearchParams): ModelsOutco
 
 function deleteProviderKey(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome {
   const label = form.get("label") ?? "";
+  // spec 0.1.92: a provider key is deleted on its provider row (prov_delete: asks first, removes its mirrors)
+  if (label.startsWith("@")) return refused("unknown_key", "delete a provider key on its provider row.");
   if (!Object.hasOwn(ctx.state.keyStore.values, providerKeyName(label))) return refused("unknown_key", "this key does not exist.");
   if (form.get("confirm") !== "1") {
     const q = deleteQuestion(ctx, t, providerKeyName(label), label, { action: "pkey_delete", label });
@@ -616,7 +621,12 @@ function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcom
   if (picked && (!isProviderKeyName(picked) || (isProviderSlot(picked) ? picked !== providerSlot(provider.id) : !Object.hasOwn(ctx.state.keyStore.values, picked)))) return refused("key_unknown", "choose a key from the list.");
   if (Buffer.byteLength(newKey) > VALUE_MAX_BYTES) return refused("too_large", "the value is too large (at most 16 KB).");
   const insName = ins ? appName(ctx, productOf(t, ins)) : "Workspace";
-  const newLabel = `${provider.label} · ${insName} · ${ROLE_LABEL[role]}`.slice(0, PROVIDER_KEY_LABEL_MAX);
+  // a key for this one setting: "<Provider> · <App> · <role>"; a label another setting already uses gets the instance's
+  // last characters, and a label still in use by another setting is refused (never overwrite another setting's key)
+  const usedByOther = (label: string) => ctx.state.bindings.some((b) => b.keyName === providerKeyName(label) && !(b.role === role && b.ins === ins));
+  let newLabel = `${provider.label} · ${insName} · ${ROLE_LABEL[role]}`.slice(0, PROVIDER_KEY_LABEL_MAX);
+  if (usedByOther(newLabel)) newLabel = `${newLabel.slice(0, PROVIDER_KEY_LABEL_MAX - 9)} · ${(ins ?? "workspace").slice(-6)}`;
+  if (provider.keyNeeded && newKey && usedByOther(newLabel)) return refused("key_label_in_use", "another setting uses a key with this name. Remove that key first.");
   if (provider.keyNeeded && newKey && !Object.hasOwn(ctx.state.keyStore.values, providerKeyName(newLabel)) && providerLabels(ctx).length >= PROVIDER_KEYS_MAX) return refused("too_many_keys", `at most ${PROVIDER_KEYS_MAX} keys for one setting.`);
   const keyName = !provider.keyNeeded ? undefined : newKey ? providerKeyName(newLabel) : picked || providerSlot(provider.id);
   const asked = form.get("dataPolicy") ?? "";
@@ -658,7 +668,9 @@ function bind(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcom
   ctx.log.info("bridge.models.bound", { role, ...(ins ? { ins } : {}), provider: provider.id, dataPolicy, keysRev: ctx.state.keyStore.keysRev });
   if (dataPolicy === "zdr" && !zdrAttestedAt) {
     // an effective gateway without a current attestation: stored, counts as `standard` until the owner confirms for this host
-    const fields = Object.fromEntries([...form].filter(([k]) => k !== "csrf" && k !== "confirm"));
+    // never a value on a page (§9.3): the per-setting key is stored already; the replay names it instead of carrying it
+    const fields = Object.fromEntries([...form].filter(([k]) => k !== "csrf" && k !== "confirm" && k !== "newKey" && k !== "value"));
+    if (next.keyName) fields.keyName = next.keyName;
     return { kind: "confirm", saved: true, title: "Confirm zero data retention", text: `${gatewayTick(host)}. Until you confirm, this model counts as standard.`, fields: { ...fields, zdr_host: host }, button: "I confirm" };
   }
   return { kind: "saved", flash: ins ? `Saved ${ROLE_LABEL[role]} for ${appName(ctx, productOf(t, ins))} only.` : `Saved ${ROLE_LABEL[role]} for all apps.` };
@@ -800,7 +812,8 @@ const appsNames = (ctx: BridgeContext, products: readonly string[]) => [...new S
 function keep(ctx: BridgeContext, t: Table, name: string): ModelsOutcome {
   const k = linkedNames(t).find((x) => x.name === name);
   if (!k || !Object.hasOwn(ctx.state.keyStore.values, name)) return refused("unknown_key", "this key does not exist.");
-  ctx.state.commitKeys({}, { overrides: [...overridesOf(ctx.state, t), name] });
+  // no served value changes: the list is written without a keysRev bump (no engine restart)
+  ctx.state.saveOverrides([...overridesOf(ctx.state, t), name]);
   ctx.log.info("bridge.keys.override_kept", { keyName: name, keysRev: ctx.state.keyStore.keysRev });
   return { kind: "saved", flash: `${name} stays an override for ${appsNames(ctx, k.products)}.` };
 }

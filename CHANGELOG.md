@@ -9,6 +9,7 @@ One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release 
 - **Nothing is picked silently.** Differing stored values for one provider are shown as Value 1 / Value 2 "differs" (values never shown); the owner chooses. No stored value is rewritten at boot.
 - **Rollback to 0.2.15 is safe.** Values that follow a provider key are also stored under their own names, bindings name `pk:@<provider>` explicitly, and `KeyStore.overrides[]` survives an older bridge's writes. Apps added after the provider key was saved get a mirror when the config arrives.
 - The page carries one nonce'd script (shows and hides fields, follows the system dark mode); every form works without it.
+- A binding that names another provider's key (`pk:@<other>`) never resolves: its row shows "key not set" until the owner saves it again. Owner saves write `keyName` on every binding of a provider that needs a key.
 - Spec pin stays 0.1.78; `provider-keys.ts` holds a marked local copy of the 0.1.92 names. Tests: `provider-keys.test.ts` (PK-1..PK-6); key-page tests updated for the new layout.
 
 ## 0.2.15 — a first contact through a long tool name (manifest 0.1.37, C383, D-C383-JM1)

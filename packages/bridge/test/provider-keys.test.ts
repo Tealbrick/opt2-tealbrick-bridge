@@ -116,7 +116,7 @@ describe("one key per provider: page, resolve, mirrors, conflicts (PK-1..PK-6)",
     assert.match(html, /Save for Guard · Reasoning \(chat\) only/);
     assert.match(html, /Replace for Guard|Save for Guard/, "Composio is an other app key, scoped to Guard");
     assert.doesNotMatch(html, /id="k-OPENAI_API_KEY"/, "a linked name is not an 'other app key'");
-    assert.match(html, /OPENAI_API_KEY<\/strong> <span class="tb-tag live"><span class="tb-ink">Follows the OpenAI key/);
+    assert.match(html, /OPENAI_API_KEY<\/strong> <span class="tb-tag idle"><span class="tb-ink">Waits for the OpenAI key/);
     assert.equal((html.match(/<script\b/g) ?? []).length, 1);
     assert.match(html, /<form class="bp-form" method="post" action="\/keys" data-binding>/, "binding forms are plain POST forms");
     assert.doesNotMatch(html, /\son[a-z]+=/i, "no event-handler attributes");
@@ -263,5 +263,44 @@ describe("one key per provider: page, resolve, mirrors, conflicts (PK-1..PK-6)",
     st().saveKeyStore();
     const reread = (st() as unknown as { readRecord: (n: string) => { overrides?: string[] } }).readRecord("keys");
     assert.deepEqual(reread.overrides, ["OPENAI_API_KEY"]);
+  });
+
+  test("review fixes: no key on the gateway confirm page; setting-key labels never collide; @ labels; keep does not bump", async () => {
+    // a gateway zdr save with a key for this setting only: the confirm page carries the key NAME, never the value
+    const r = await post({ action: "bind", role: "dreaming", ins: INS, provider: "openrouter", model: "or-test", dataPolicy: "zdr", newKey: "sk-test-keys-lead-GW01" });
+    assert.equal(r.status, 200);
+    const confirm = await r.text();
+    assert.ok(!confirm.includes("sk-test-keys-lead-GW01"), "the value never reaches the confirm page");
+    assert.match(confirm, /name="keyName" value="pk:OpenRouter · Notes · Dreaming"/);
+    assert.doesNotMatch(confirm, /name="newKey"/);
+    // a second setting whose label would be the same gets the instance suffix; the first key is untouched
+    const before = values()["pk:OpenRouter · Notes · Dreaming"];
+    assert.equal(before, "sk-test-keys-lead-GW01");
+    st().saveBindings([...st().bindings, { role: "reasoning", provider: "openrouter", model: "or-2", keyName: "pk:OpenRouter · Notes · Dreaming", dataPolicy: "standard" }]);
+    assert.equal((await post({ action: "bind", role: "dreaming", ins: INS, provider: "openrouter", model: "or-test", dataPolicy: "standard", newKey: "sk-test-keys-lead-GW02" })).status, 303);
+    assert.equal(values()["pk:OpenRouter · Notes · Dreaming"], "sk-test-keys-lead-GW01", "another setting's key is never overwritten");
+    assert.equal(st().bindings.find((b) => b.role === "dreaming" && b.ins === INS)?.keyName, `pk:OpenRouter · Notes · Dreaming · ${INS.slice(-6)}`);
+    // a provider key is never deleted through the older-key path
+    assert.equal((await post({ action: "pkey_delete", label: "@openai", confirm: "1" })).status, 400);
+    assert.ok(Object.hasOwn(values(), "pk:@openai"));
+    // keep as an override changes no served value: no keysRev bump
+    st().keyStore.values.OPENAI_KEY_TWO = "sk-test-keys-lead-KEEP";
+    st().saveKeyStore();
+    const rev = st().keyStore.keysRev;
+    assert.equal((await post({ action: "akey_keep", name: "OPENAI_KEY_TWO" })).status, 303);
+    assert.equal(st().keyStore.keysRev, rev);
+    assert.ok(st().keyStore.overrides?.includes("OPENAI_KEY_TWO"));
+    // an owner write names the key of every binding of a keyNeeded provider (rollback)
+    st().saveBindings(st().bindings.map((b) => (b.role === "reasoning" && !b.ins ? (({ keyName: _k, ...rest }) => rest)(b) : b)));
+    assert.equal(st().bindings.find((b) => b.role === "reasoning" && !b.ins)?.keyName, "pk:@openai");
+  });
+
+  test("the script reads only its own elements (options carry other attribute names)", async () => {
+    const html = await page();
+    assert.doesNotMatch(html, /<option[^>]*data-keyline/);
+    assert.doesNotMatch(html, /<option[^>]*data-zdr=/);
+    assert.match(html, /<option[^>]*data-line="[^"]*" data-needsurl="[01]" data-zdrok="[01]" data-needskey="[01]"/);
+    assert.match(html, /querySelector\("p\[data-keyline\]"\)/);
+    assert.match(html, /querySelector\("label\[data-zdr\]"\)/);
   });
 });
