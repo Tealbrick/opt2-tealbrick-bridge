@@ -2,6 +2,12 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.17 — key page polish (after the qa1 test of 0.2.16)
+
+- Workspace defaults fold into "Set <role> for all apps" / "Change <role> for all apps"; only a required role that is not set opens by itself. The page is much shorter when little is set.
+- An app key with its own value while no provider key exists reads "Own value, not shared yet" with "Use it for all <Provider> apps", not "Differs".
+- No state, resolve or spec change.
+
 ## 0.2.16 — one key per provider on the key page (spec 0.1.92, Martin 2026-11-06)
 
 - **Enter a key once.** The "Keys and models" page starts with one row per provider. "Save for all apps" stores the key as `pk:@<provider>`. Every app key whose manifest names that provider (e.g. Knowledge `OPENAI_API_KEY`, provider "OpenAI") and every model that uses the provider gets it, also apps added later. `getKey` and `modelRole` behave the same for apps.

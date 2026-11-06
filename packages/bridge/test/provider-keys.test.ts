@@ -119,6 +119,8 @@ describe("one key per provider: page, resolve, mirrors, conflicts (PK-1..PK-6)",
     assert.match(html, /OPENAI_API_KEY<\/strong> <span class="tb-tag idle"><span class="tb-ink">Waits for the OpenAI key/);
     assert.equal((html.match(/<script\b/g) ?? []).length, 1);
     assert.match(html, /<form class="bp-form" method="post" action="\/keys" data-binding>/, "binding forms are plain POST forms");
+    assert.match(html, /<details open><summary>Set Reasoning \(chat\) for all apps<\/summary>/, "a required unset default is open");
+    assert.match(html, /<details><summary>Set Dreaming for all apps<\/summary>/, "an optional unset default is folded");
     assert.doesNotMatch(html, /\son[a-z]+=/i, "no event-handler attributes");
   });
 
@@ -223,6 +225,7 @@ describe("one key per provider: page, resolve, mirrors, conflicts (PK-1..PK-6)",
     let html = await page();
     assert.match(html, /These OpenAI keys differ\./);
     assert.match(html, /<strong>Value 1<\/strong> <span class="tb-tag needs-you">differs<\/span>: OPENAI_API_KEY/);
+    assert.match(html, /OPENAI_API_KEY<\/strong> <span class="tb-tag idle"><span class="tb-ink">Own value, not shared yet/, "no provider key yet: not a conflict tag");
     assert.match(html, /<strong>Value 2<\/strong> <span class="tb-tag needs-you">differs<\/span>: older key &quot;OpenAI main&quot;/);
     noLeak(html);
     const rev = st().keyStore.keysRev;

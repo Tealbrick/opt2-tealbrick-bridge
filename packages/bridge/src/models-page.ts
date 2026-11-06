@@ -376,7 +376,9 @@ export function renderDefaults(ctx: BridgeContext, t: Table, csrf: string, hints
     <div class="bp-key-head"><h3 id="${id}">${esc(ROLE_LABEL[v.role])}${v.required ? "" : " <small>(optional)</small>"}</h3>${roleTag(ctx, v, def, overrides)}</div>
     <div class="bp-used"><span class="tb-mono">${esc(v.role)}</span><span>used by</span>${chips}<span>at least: ${esc(POLICY_LABEL[v.minPolicy])}</span></div>
     <p class="tb-soft">Workspace default: ${esc(def ? bindingText(ctx, def) : "not set")}</p>${ovText}${suggested}
-    ${bindingForm(ctx, csrf, v, `${id}-d`, init, { label: "all apps" }, !!def)}${def ? `\n    ${postForm(csrf, { action: "unbind", role: v.role }, "Remove the default", "tb-btn danger")}` : ""}
+    <details${!def && v.required ? " open" : ""}><summary>${esc(def ? `Change ${ROLE_LABEL[v.role]} for all apps` : `Set ${ROLE_LABEL[v.role]} for all apps`)}</summary>
+    ${bindingForm(ctx, csrf, v, `${id}-d`, init, { label: "all apps" }, !!def)}
+    </details>${def ? `\n    ${postForm(csrf, { action: "unbind", role: v.role }, "Remove the default", "tb-btn danger")}` : ""}
   </section>`;
     })
     .join("");
@@ -400,14 +402,16 @@ function linkedRows(ctx: BridgeContext, t: Table, csrf: string, product: string)
       const st = linkState(ctx.state, t, k) as Exclude<LinkState, "own">;
       const apps = appsText(ctx, k.products);
       const slotSet = hasValue(ctx, providerSlot(p.id));
-      const text = st === "follows" ? (slotSet ? `Follows the ${p.label} key` : `Waits for the ${p.label} key`) : st === "override" ? "Override" : "Differs";
+      // no provider key yet: an app's own value is "not shared yet" (the provider row offers it for all apps), not a conflict
+      const text = st === "follows" ? (slotSet ? `Follows the ${p.label} key` : `Waits for the ${p.label} key`) : st === "override" ? "Override" : slotSet ? "Differs" : "Own value, not shared yet";
       const id = `ak-${product}-${k.name}`;
       const actions = [
         st !== "follows" && slotSet ? postForm(csrf, { action: "akey_follow", name: k.name }, `Use the ${p.label} key`) : "",
+        st === "differs" && !slotSet ? postForm(csrf, { action: "prov_adopt", provider: p.id, from: k.name }, `Use it for all ${p.label} apps`, "tb-btn primary") : "",
         st === "differs" ? postForm(csrf, { action: "akey_keep", name: k.name }, "Keep as an override") : "",
       ].join("");
       return `
-      <li><strong class="tb-mono">${esc(k.name)}</strong> <span class="tb-tag ${st === "follows" && !slotSet ? "idle" : LINK_TAG[st]}">${ink(text)}</span>${actions ? `<div class="bp-form">${actions}</div>` : ""}
+      <li><strong class="tb-mono">${esc(k.name)}</strong> <span class="tb-tag ${!slotSet && st !== "override" ? "idle" : LINK_TAG[st]}">${ink(text)}</span>${actions ? `<div class="bp-form">${actions}</div>` : ""}
         <details${st === "override" ? " open" : ""}><summary>${esc(st === "override" ? `Replace the key for ${apps}` : `Use a different key for ${apps} only`)}</summary>
         <form class="bp-form" method="post" action="/keys">${hidden({ csrf, name: k.name })}<label class="tb-sr" for="${esc(id)}">${esc(k.label)}</label><input class="tb-input" id="${esc(id)}" name="value" type="password" autocomplete="off" required placeholder="Enter a key for ${esc(apps)} only"><button class="tb-btn" type="submit">${ink(`Save for ${apps} only`)}</button></form></details></li>`;
     })
