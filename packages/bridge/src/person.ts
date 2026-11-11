@@ -12,7 +12,7 @@ import { connect as netConnect, type Socket } from "node:net";
 import { isRefusal } from "@opt2-tealbrick/relay";
 import { LIFETIME_S, type PersonTicketKeysClaims, type PersonTicketLaunchClaims, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { BridgeContext } from "./context.ts";
-import { appKeyChange, applyModelsPost, confirmPage, deleteQuestion, hintsFrom, KEYS_CSS, KEYS_SCRIPT, type RoleHint, renderDefaults, renderOlderKeys, renderOverrides, renderOwnHosts, renderProviders } from "./models-page.ts";
+import { appKeyChange, applyModelsPost, confirmPage, deleteQuestion, hintsFrom, KEYS_CSS, KEYS_SCRIPT, modelsList, type RoleHint, renderDefaults, renderOlderKeys, renderOverrides, renderOwnHosts, renderProviders } from "./models-page.ts";
 import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
 import { keyNames } from "./provider-keys.ts";
 import { type AppRuntime, keyRequirements } from "./table.ts";
@@ -43,6 +43,8 @@ export class PersonSurfaces {
   /** unauthenticated body routes (launch, key page POST), per client address (BSD-01) */
   private readonly launchLimit = new RateLimiter(30);
   private readonly keysPostLimit = new RateLimiter(30);
+  /** the model lists of the key page (`POST /keys?list=1`): its own budget, so opening forms never uses up the saves */
+  private readonly modelsListLimit = new RateLimiter(60);
   private readonly upgrades = new OpenCounter(MAX_UPGRADES_PER_CLIENT);
 
   constructor(ctx: BridgeContext) {
@@ -238,7 +240,8 @@ export class PersonSurfaces {
       };
       // the one "not saved" page (BRIDGE-PAGES #4): the reason, back to the keys
       const notSaved = (reason: string): Message => ({ title: "The key was not saved", text: `The key was not saved: ${reason}`, sign: "person", action: linkButton("/keys", "Back to the keys", true), detail: "Nothing was stored. Your other keys did not change." });
-      if (!this.keysPostLimit.take(clientIp(req)))
+      const listing = new URL(req.url ?? "/keys", "http://bridge.invalid").searchParams.get("list") === "1";
+      if (!(listing ? this.modelsListLimit : this.keysPostLimit).take(clientIp(req)))
         return refuse("rate_limited", null, 429, { title: "Too many requests", text: "The key was not saved. Please wait a minute and try again.", sign: "person", detail: "This protects your workspace from guessing.", headers: { "retry-after": "60" } });
       let raw: Buffer;
       try {
@@ -279,6 +282,12 @@ export class PersonSurfaces {
           detail: `Key pages close after ${LIFETIME_S.keyPageSession / 60} minutes so a key can never be entered on a page left open.`,
         });
       if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, notSaved("the form expired. Go back to the keys and try again."));
+      // the model list of a binding form (page script, JSON): read only, nothing is stored
+      if (listing) {
+        const list = form.get("action") === "models_list" ? await modelsList(this.ctx, form) : { refused: "list_unsupported", reason: "unknown request." };
+        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(list));
+        return;
+      }
       // v0.1.63 (BRIDGE §15.2): provider keys and model bindings
       const outcome = applyModelsPost(this.ctx, t, form);
       if (outcome?.kind === "confirm") {
@@ -372,6 +381,7 @@ export class PersonSurfaces {
       headers,
       css: KEYS_CSS,
       script: KEYS_SCRIPT,
+      connect: true,
       main: `
   <section class="bp-card wide" aria-labelledby="h">
     <h1 id="h">Keys and models</h1>

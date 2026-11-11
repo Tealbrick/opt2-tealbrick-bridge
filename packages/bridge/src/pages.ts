@@ -138,18 +138,21 @@ export interface PageSpec {
   script?: string;
   /** CSP form-action (default 'self') */
   formAction?: string;
+  /** CSP connect-src 'self': the page script may call its own origin (the key page's model lists) */
+  connect?: boolean;
   /** trusted page CSS added to the nonce'd <style> (after the app colours) */
   css?: string;
 }
 
 /** CSP of an HTML page; exported for the tests */
-export function pageCsp(nonce: string, o: { script?: boolean; formAction?: string } = {}): string {
+export function pageCsp(nonce: string, o: { script?: boolean; formAction?: string; connect?: boolean } = {}): string {
   return [
     "default-src 'none'",
     `style-src '${PAGE_CSS_HASH}' 'nonce-${nonce}'`,
     "font-src 'self'",
     "img-src 'self'",
     `script-src ${o.script ? `'nonce-${nonce}'` : "'none'"}`,
+    ...(o.connect ? ["connect-src 'self'"] : []),
     `form-action ${o.formAction ?? "'self'"}`,
     "frame-ancestors 'none'",
     "base-uri 'none'",
@@ -171,7 +174,7 @@ export function htmlPage(res: ServerResponse, status: number, p: PageSpec): void
     "cache-control": "no-store",
     "x-frame-options": "DENY",
     "referrer-policy": "no-referrer",
-    "content-security-policy": pageCsp(nonce, { script: !!p.script, ...(p.formAction ? { formAction: p.formAction } : {}) }),
+    "content-security-policy": pageCsp(nonce, { script: !!p.script, ...(p.formAction ? { formAction: p.formAction } : {}), ...(p.connect ? { connect: true } : {}) }),
     ...p.headers,
   });
   const ws = p.workspace ? `<span class="bp-ws">${esc(p.workspace)}</span>` : "";
