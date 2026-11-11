@@ -11,6 +11,7 @@ import type { ModelRoleRequirementEntry } from "@opt2-tealbrick/spec/bridge";
 import type { InstanceId, PersonTicketKeysClaims } from "@opt2-tealbrick/spec/credentials";
 import { DATA_POLICY_RANK, type DataPolicy, MODEL_ID_PATTERN, MODEL_PROVIDERS, MODEL_ROLE_HINTS_MAX, MODEL_ROLES, type ModelProvider, type ModelRole, OWN_HOSTS_MAX, type PolicyBasis } from "@opt2-tealbrick/spec/models";
 import type { BridgeContext } from "./context.ts";
+import { listModels, listRequest, type ModelListResult } from "./model-list.ts";
 import {
   baseUrlOf,
   boundKey,
@@ -20,6 +21,7 @@ import {
   effectivePolicy,
   isDataPolicy,
   isModelRole,
+  neverCallUrl,
   type OwnNet,
   ownNet,
   policyMeets,
@@ -303,7 +305,7 @@ function bindingForm(ctx: BridgeContext, csrf: string, v: RoleView, id: string, 
   const opts = choices
     .map(
       (p) =>
-        `<option value="${esc(p.id)}"${p.id === chosen?.id ? " selected" : ""} data-line="${esc(keyLine(ctx, p))}" data-needsurl="${p.defaultBaseUrl ? "0" : "1"}" data-zdrok="${p.zdrOffered ? "1" : "0"}" data-needskey="${p.keyNeeded ? "1" : "0"}">${esc(p.label)}${p.keyNeeded ? "" : " (no key)"}${p.defaultBaseUrl ? "" : " (needs an address)"}</option>`,
+        `<option value="${esc(p.id)}"${p.id === chosen?.id ? " selected" : ""} data-line="${esc(keyLine(ctx, p))}" data-needsurl="${p.defaultBaseUrl ? "0" : "1"}" data-zdrok="${p.zdrOffered ? "1" : "0"}" data-needskey="${p.keyNeeded ? "1" : "0"}" data-list="${listRequest(p, p.defaultBaseUrl ?? "http://x", undefined) ? "1" : "0"}">${esc(p.label)}${p.keyNeeded ? "" : " (no key)"}${p.defaultBaseUrl ? "" : " (needs an address)"}</option>`,
     )
     .join("");
   const pol = (["", "local", "zdr", "standard"] as const)
@@ -316,7 +318,13 @@ function bindingForm(ctx: BridgeContext, csrf: string, v: RoleView, id: string, 
   return `<form class="bp-form" method="post" action="/keys" data-binding>${hidden({ csrf, action: "bind", role: v.role, ...(scope.ins ? { ins: scope.ins } : {}) })}
       ${field("provider", "Provider", `<select class="tb-select-native" id="${id}-provider" name="provider" required data-provider>${opts}</select>`)}
       <p class="tb-hint" data-keyline>${esc(keyLine(ctx, chosen))}</p>
-      ${field("model", "Model", `<input class="tb-input" id="${id}-model" name="model" maxlength="${MODEL_MAX}" autocomplete="off" required value="${esc(init.model ?? "")}">`)}
+      ${field(
+        "model",
+        "Model",
+        `<select class="tb-select-native" id="${id}-model-list" name="model" data-modelpick hidden disabled${init.model ? ` data-saved="${esc(init.model)}" data-saved-provider="${esc(init.provider ?? "")}"` : ""}>${init.model ? `<option value="${esc(init.model)}" selected>${esc(init.model)}</option>` : `<option value="">Choose a model</option>`}</select><input class="tb-input" id="${id}-model" name="model" maxlength="${MODEL_MAX}" autocomplete="off" required value="${esc(init.model ?? "")}" data-modeltyped>`,
+        "The model name as your provider writes it.",
+        " data-modelfield",
+      )}
       ${field("baseUrl", "Base URL", `<input class="tb-input" id="${id}-baseUrl" name="baseUrl" maxlength="${URL_MAX}" autocomplete="off" inputmode="url" value="${esc(init.baseUrl ?? "")}">`, "Leave empty to use the provider's own address. Own servers and custom addresses need one.", " data-urlfield")}
       <button class="tb-btn" type="button" data-showurl hidden>${ink("Use another address")}</button>
       <details><summary>More: data policy, key${v.role === "embeddings" ? ", vector size" : ""}</summary>
@@ -490,7 +498,8 @@ export function renderOlderKeys(ctx: BridgeContext, t: Table, csrf: string): str
   </section>`;
 }
 
-/** the page's one script (spec 0.1.92 item 12): shows and hides fields, rewrites labels, sends nothing; forms work without it */
+/** the page's one script (spec 0.1.92 item 12): shows and hides fields, rewrites labels, and loads the model list of a
+ *  binding form (`POST /keys?list=1`, action `models_list`, JSON) when the form opens or its provider or address changes */
 export const KEYS_SCRIPT = `(function(){
   if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.setAttribute("data-theme", "dark");
   function each(sel, fn){ Array.prototype.forEach.call(document.querySelectorAll(sel), fn); }
@@ -508,8 +517,56 @@ export const KEYS_SCRIPT = `(function(){
       if (zdr) zdr.hidden = o.getAttribute("data-zdrok") !== "1";
       if (key) key.hidden = o.getAttribute("data-needskey") !== "1";
     }
+    var pick = form.querySelector("select[data-modelpick]"), typed = form.querySelector("input[data-modeltyped]");
+    var mfield = form.querySelector("div[data-modelfield]"), mlabel = mfield ? mfield.querySelector("label") : null, mhint = mfield ? mfield.querySelector(".tb-hint") : null;
+    var saved = pick ? pick.getAttribute("data-saved") || "" : "", savedFor = pick ? pick.getAttribute("data-saved-provider") || "" : "";
+    var seq = 0, retry = null;
+    function opt(v, t){ var o = document.createElement("option"); o.value = v; o.textContent = t; return o; }
+    // exactly one "model" field is enabled: the list, or the typed name (no list, or the list failed)
+    function mode(list){ pick.hidden = !list; pick.disabled = !list; pick.required = list; typed.hidden = list; typed.disabled = list; typed.required = !list; if (mlabel) mlabel.htmlFor = list ? pick.id : typed.id; }
+    function current(){ return sel.value === savedFor ? saved : ""; }
+    function say(t, again){
+      if (mhint) mhint.textContent = t;
+      if (again && !retry && mfield) { retry = document.createElement("button"); retry.type = "button"; retry.className = "tb-btn"; retry.textContent = "Load the list again"; retry.addEventListener("click", load); mfield.appendChild(retry); }
+      if (!again && retry) { retry.remove(); retry = null; }
+    }
+    function fill(models){
+      var keep = pick.value && models.indexOf(pick.value) >= 0 ? pick.value : current();
+      pick.textContent = ""; pick.appendChild(opt("", "Choose a model"));
+      if (keep && models.indexOf(keep) < 0) pick.appendChild(opt(keep, keep + " (saved, not in the list)"));
+      models.forEach(function(m){ pick.appendChild(opt(m, m)); }); pick.value = keep; mode(true);
+    }
+    function fallback(text){ mode(false); if (!typed.value) typed.value = current(); say(text + " Type the model name, or load the list again.", true); }
+    function load(){
+      if (!pick || !typed) return;
+      var o = sel.options[sel.selectedIndex]; if (!o) return;
+      var mine = ++seq;
+      if (o.getAttribute("data-list") !== "1") { mode(false); say("This provider has no model list. Enter the model or deployment name.", false); return; }
+      var body = new URLSearchParams();
+      body.set("csrf", (form.querySelector("input[name=csrf]") || {}).value || ""); body.set("action", "models_list");
+      body.set("role", (form.querySelector("input[name=role]") || {}).value || ""); body.set("provider", sel.value);
+      if (urlInput && urlInput.value) body.set("baseUrl", urlInput.value.trim());
+      var kn = form.querySelector("select[name=keyName]"); if (kn && kn.value) body.set("keyName", kn.value);
+      var keep = current(); pick.textContent = ""; pick.appendChild(opt(keep, keep || "Loading models…")); mode(true); pick.disabled = !keep;
+      say("Loading the models of " + o.textContent.replace(/ \\(.*$/, "") + "…", false);
+      fetch("/keys?list=1", { method: "POST", headers: { accept: "application/json" }, body: body, credentials: "same-origin" })
+        .then(function(r){ return r.headers.get("content-type") && r.headers.get("content-type").indexOf("application/json") === 0 ? r.json() : null; })
+        .then(function(j){
+          if (mine !== seq) return;
+          if (j && j.models && j.models.length) { fill(j.models); say("The models your provider offers for this kind of work.", false); }
+          else if (j && j.models) fallback("Your provider lists no model for this kind of work.");
+          else fallback(j && j.reason ? j.reason.charAt(0).toUpperCase() + j.reason.slice(1) : "The model list did not load. This page may have expired: open the key page again from Portal.");
+        })
+        .catch(function(){ if (mine === seq) fallback("The model list did not load."); });
+    }
+    var box = form.closest("details"), started = false;
+    function start(){ if (!started && (!box || box.open)) { started = true; load(); } }
+    if (box) box.addEventListener("toggle", start);
     if (show) show.addEventListener("click", function(){ opened = true; update(); if (urlInput) urlInput.focus(); });
-    sel.addEventListener("change", update); update();
+    sel.addEventListener("change", function(){ update(); if (started) load(); else start(); });
+    if (urlInput) urlInput.addEventListener("change", function(){ if (started) load(); });
+    var kn0 = form.querySelector("select[name=keyName]"); if (kn0) kn0.addEventListener("change", function(){ if (started) load(); });
+    update(); start();
   });
   each("form[data-addprovider]", function(form){
     var sel = form.querySelector("select"), inp = form.querySelector("input[type=password]");
@@ -551,6 +608,31 @@ export function deleteQuestion(ctx: BridgeContext, t: Table, name: string, displ
 const refused = (code: string, reason: string): ModelsOutcome => ({ kind: "refused", code, reason });
 
 /** Applies a models post (`action` pkey | pkey_delete | bind | unbind); undefined = not a models action. */
+/**
+ * `action=models_list` (the page script, JSON): the models the chosen provider offers for the role, read with the key that
+ * setting would use. The base URL passes the same §15.3 check as a save; nothing is stored.
+ */
+export async function modelsList(ctx: BridgeContext, form: URLSearchParams): Promise<ModelListResult> {
+  const role = form.get("role");
+  if (!isModelRole(role)) return { refused: "list_unsupported", reason: "this kind of model is unknown." };
+  const provider = providerById(form.get("provider") ?? "");
+  if (!provider?.roles.includes(role)) return { refused: "list_unsupported", reason: "choose a provider from the list." };
+  const raw = form.get("baseUrl") ?? "";
+  if (raw.length > URL_MAX) return { refused: "list_unsupported", reason: `the base URL is too long (at most ${URL_MAX} characters).` };
+  if (!raw && !provider.defaultBaseUrl) return { refused: "list_unsupported", reason: `enter the ${provider.label} base URL first.` };
+  const checked = classifyBase(raw || (provider.defaultBaseUrl as string), ownNet(ctx));
+  if ("refused" in checked) return { refused: "list_unsupported", reason: checked.refused };
+  if (neverCallUrl(checked.href)) return { refused: "list_unsupported", reason: "the bridge does not call a link-local, cloud metadata or unspecified address." };
+  // the key a save would use: an older named key the form picked, else the provider's key (never a key typed but not saved)
+  const picked = (form.get("keyName") ?? "").trim();
+  if (picked && (!isProviderKeyName(picked) || (isProviderSlot(picked) ? picked !== providerSlot(provider.id) : !hasValue(ctx, picked)))) return { refused: "list_unsupported", reason: "choose a key from the list." };
+  const keyName = provider.keyNeeded ? picked || providerSlot(provider.id) : undefined;
+  const key = keyName ? ctx.state.keyStore.values[keyName] : undefined;
+  const result = await listModels(ctx.fetch, provider, role, checked.href, key, (n) => MODEL_ID.test(n));
+  ctx.log.info("bridge.models.listed", { provider: provider.id, role, ...("refused" in result ? { code: result.refused } : { count: result.models.length }) });
+  return result;
+}
+
 export function applyModelsPost(ctx: BridgeContext, t: Table, form: URLSearchParams): ModelsOutcome | undefined {
   const action = form.get("action");
   if (action === "pkey") return saveProviderKey(ctx, form);

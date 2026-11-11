@@ -2,6 +2,16 @@
 
 One section per version (CONTRIBUTING.md rule 5). Earlier versions: the release notes in README.md "Status" and the PR descriptions.
 
+## 0.2.18 — pick the model from the provider's list (Martin 2026-11-11, hotfix)
+
+- The Model field of a workspace default or an override is a dropdown. When the form opens, or its provider, address or key changes, the page asks the bridge for the provider's model list (`POST /keys?list=1`, action `models_list`, JSON, own rate limit of 60 a minute). The bridge reads the provider's list-models address with the key that setting would use: `GET <base>/models` with a Bearer key for OpenAI-compatible providers, `/v1/models` with `x-api-key` for Anthropic, `/v1beta/models` with `x-goog-api-key` for Gemini.
+- Only names for the role are shown (embeddings: embedding models; chat roles: no embedding, audio or image models; Gemini and Together by their own kind). A custom server whose names say nothing about the role shows every name. A name the binding pattern refuses is left out. A saved model that is not in the list stays, marked "(saved, not in the list)".
+- The base URL passes the same §15.3 check as a save before any call; no redirect, 10 s timeout, answers over 4 MB refused. The answer to the page is names only: never the key and never the provider's own error text. Nothing is stored.
+- Azure OpenAI (deployment names) and Voyage AI have no list address: their form keeps the typed name. When a list fails (a refused key, a key typed for this setting only, a server without a list), the form also falls back to the typed name, with "Load the list again". Without the page script the typed name works as before.
+- The bridge never calls a link-local, cloud metadata or unspecified address for a list (any scheme), says no provider status code or text, and runs at most 4 lists at a time.
+- The key page CSP adds `connect-src 'self'` (the page script calls its own origin only).
+- Spec: BRIDGE §1.1 said "the bridge never calls a provider". This is the one exception, on the owner's key page only; the spec text follows in specs.
+
 ## 0.2.17 — key page polish (after the qa1 test of 0.2.16)
 
 - Workspace defaults fold into "Set <role> for all apps" / "Change <role> for all apps"; only a required role that is not set opens by itself. The page is much shorter when little is set.

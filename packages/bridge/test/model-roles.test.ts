@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { after, before, describe, test } from "node:test";
 import type { ModelRoleRequirementEntry, StatusReport } from "@opt2-tealbrick/spec/bridge";
 import { DATA_POLICIES, DATA_POLICY_RANK, type DataPolicy, MODEL_PROVIDERS, NEVER_LOCAL, NEVER_LOCAL_HOSTNAMES } from "@opt2-tealbrick/spec/models";
@@ -63,6 +64,7 @@ function harness(get: () => World) {
     },
     post: (fields: Record<string, string>) => fetch(`${get().keysUrl}/keys`, { method: "POST", headers: { ...FORM, cookie }, body: new URLSearchParams({ csrf, ...fields }), redirect: "manual" }),
     page: async () => (await fetch(`${get().keysUrl}/keys`, { headers: { cookie } })).text(),
+    list: (fields: Record<string, string>, token = csrf) => fetch(`${get().keysUrl}/keys?list=1`, { method: "POST", headers: { ...FORM, cookie, accept: "application/json" }, body: new URLSearchParams({ csrf: token, ...fields }), redirect: "manual" }),
     async role(key: Ed25519KeyPair, ins: string, role: string, svc?: string) {
       const w = get();
       const path = `/tb/v1/model-roles/${role}`;
@@ -236,7 +238,8 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     assert.deepEqual(providers.slice(0, 3), ["ollama", "llama-server", "lm-studio"], "local providers listed first");
     assert.ok(!providers.includes("anthropic"), "only providers that serve the role");
     assert.match(html, /Suggested: OpenAI · gpt-hint · standard\. Nothing is saved until you save it\./);
-    assert.match(html, /id="r-reasoning-d-model"[^>]*value="gpt-hint"/);
+    assert.match(html, /id="r-reasoning-d-model" name="model"[^>]*required value="gpt-hint" data-modeltyped>/, "the typed name works without the script");
+    assert.match(html, /<select class="tb-select-native" id="r-reasoning-d-model-list" name="model" data-modelpick hidden disabled data-saved="gpt-hint" data-saved-provider="openai">/);
     assert.equal(w.bridge.ctx.state.bindings.length, 0, "a hint stores nothing");
     assert.match(html, /I confirm a zero-data-retention contract with this provider/);
   });
@@ -579,5 +582,74 @@ describe("spec follow-up #49 on the page: Own hosts, gateway attestation, owner-
     const html = await h.page();
     assert.ok(html.includes("zero data retention (owner-attested)"));
     assert.ok(!/Zero data retention(?! \(owner-attested\))/i.test(html.replaceAll("zero data retention (owner-attested)", "")), "no other zdr wording");
+  });
+});
+
+describe("the model list of a binding form (Martin 2026-11-11): the provider's own list, read with the saved key", () => {
+  let w: World;
+  const h = harness(() => w);
+  let provider: Server;
+  let base = "";
+  const seen: { path: string; auth: string | undefined }[] = [];
+  before(async () => {
+    provider = createServer((req, res) => {
+      seen.push({ path: req.url ?? "", auth: req.headers.authorization });
+      if (req.headers.authorization !== "Bearer sk-list-canary") return void res.writeHead(401).end("{}");
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: [{ id: "text-embedding-3-small" }, { id: "gpt-list" }, { id: "whisper-1" }, { id: "bad name" }] }));
+    });
+    await new Promise<void>((ok) => provider.listen(0, "127.0.0.1", ok));
+    base = `http://127.0.0.1:${(provider.address() as { port: number }).port}/v1`;
+    w = await makeWorld({ real: true });
+    await w.amend((c) => {
+      c.modelRoleRequirements = [REQS[0] as ModelRoleRequirementEntry, REQS[5] as ModelRoleRequirementEntry];
+    });
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    await h.open();
+  });
+  after(async () => {
+    await w.close();
+    provider.close();
+  });
+
+  test("names for the role only, the key in the Authorization header and never in the answer; a refused key says so", async () => {
+    const before = await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: base });
+    assert.deepEqual(await before.json(), { refused: "key_missing", reason: "Enter the OpenAI-compatible (custom address) key under Provider keys first." });
+    assert.equal(seen.length, 0, "no call without a key");
+    assert.equal((await h.post({ action: "prov_save", provider: "openai-compatible", value: "sk-list-canary" })).status, 303);
+    const r = await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: base });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get("content-type") ?? "", /^application\/json/);
+    const text = await r.text();
+    assert.ok(!text.includes("sk-list-canary"), "the key never goes to the page");
+    assert.deepEqual(JSON.parse(text), { models: ["text-embedding-3-small"] });
+    assert.deepEqual(seen.at(-1), { path: "/v1/models", auth: "Bearer sk-list-canary" });
+    const chat = await (await h.list({ action: "models_list", role: "reasoning", provider: "openai-compatible", baseUrl: base })).json();
+    assert.deepEqual(chat, { models: ["gpt-list"] }, "no embedding or audio model for chat; a name the binding pattern refuses is left out");
+    assert.equal((await h.post({ action: "prov_save", provider: "openai-compatible", value: "sk-wrong" })).status, 303);
+    assert.equal((await (await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: base })).json()).refused, "key_refused");
+    assert.equal(w.bridge.ctx.state.bindings.length, 0, "a list stores nothing");
+  });
+
+  test("the list is read only: a save action on the list address saves nothing; a bad csrf or a refused address calls no one", async () => {
+    const n = seen.length;
+    const r = await h.list({ action: "bind", role: "reasoning", provider: "openai-compatible", model: "gpt-list", baseUrl: base });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).refused, "list_unsupported");
+    assert.equal(w.bridge.ctx.state.bindings.length, 0);
+    const bad = await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: base }, "wrong");
+    assert.equal(bad.status, 403);
+    const pub = await (await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: "http://203.0.113.9/v1" })).json();
+    assert.equal(pub.refused, "list_unsupported", "plain http to a public address is refused before any call");
+    const meta = await (await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: "https://169.254.169.254/v1" })).json();
+    assert.equal(meta.refused, "list_unsupported", "a metadata address is never called, also over https");
+    assert.equal(seen.length, n, "no provider call");
+  });
+
+  test("the page: the list select for the script, the typed name without it; each provider says if it has a list", async () => {
+    const html = await h.page();
+    assert.match(html, /<select class="tb-select-native" id="r-embeddings-d-model-list" name="model" data-modelpick hidden disabled>/, "the script shows the list");
+    assert.match(html, /<input class="tb-input" id="r-embeddings-d-model" name="model"[^>]*required value="" data-modeltyped>/, "without the script: the typed name");
+    assert.match(html, /data-needskey="1" data-list="0">Azure OpenAI/);
+    assert.match(html, /data-list="1">OpenAI</);
   });
 });

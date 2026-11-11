@@ -25,14 +25,16 @@ const directives = (csp: string | null) => new Map((csp ?? "").split(";").map((d
 const nonceOf = (csp: string | null) => /'nonce-([A-Za-z0-9_-]+)'/.exec(csp ?? "")?.[1];
 
 /** checks every rule a bridge HTML page must keep; returns the nonce */
-function checkPage(r: Response, html: string, o: { script?: boolean } = {}): string {
+function checkPage(r: Response, html: string, o: { script?: boolean; connect?: boolean } = {}): string {
   assert.match(r.headers.get("content-type") ?? "", /^text\/html; charset=utf-8$/);
   const csp = r.headers.get("content-security-policy");
   assert.ok(csp && !csp.includes("unsafe-inline"), `no 'unsafe-inline': ${csp}`);
   const nonce = nonceOf(csp) as string;
   assert.ok(nonce && nonce.length >= 22, "a nonce of 16 random bytes");
   const d = directives(csp);
-  assert.deepEqual([...d.keys()], ["default-src", "style-src", "font-src", "img-src", "script-src", "form-action", "frame-ancestors", "base-uri"]);
+  // only the key page may call its own origin (the model list of a binding form)
+  assert.deepEqual([...d.keys()], ["default-src", "style-src", "font-src", "img-src", "script-src", ...(o.connect ? ["connect-src"] : []), "form-action", "frame-ancestors", "base-uri"]);
+  if (o.connect) assert.equal(d.get("connect-src"), "'self'");
   assert.equal(d.get("default-src"), "'none'");
   assert.equal(d.get("style-src"), `'${PAGE_CSS_HASH}' 'nonce-${nonce}'`);
   assert.equal(d.get("font-src"), "'self'");
@@ -84,7 +86,7 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
     assert.equal(open.status, 200);
     cookie = String(open.headers.get("set-cookie")).split(";")[0] as string;
     const html = await open.text();
-    checkPage(open, html, { script: true }); // spec 0.1.92 item 12: the key page's one nonce'd script
+    checkPage(open, html, { script: true, connect: true }); // spec 0.1.92 item 12: the key page's one nonce'd script
     csrf = /name="csrf" value="([^"]+)"/.exec(html)?.[1] as string;
     assert.ok(csrf);
   });
@@ -98,8 +100,8 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
   test("CSP: exact directives, hash = the inlined CSS, a new nonce per response, no 'unsafe-inline'", async () => {
     const a = await keysGet();
     const b = await keysGet();
-    const na = checkPage(a, await a.text(), { script: true });
-    const nb = checkPage(b, await b.text(), { script: true });
+    const na = checkPage(a, await a.text(), { script: true, connect: true });
+    const nb = checkPage(b, await b.text(), { script: true, connect: true });
     assert.notEqual(na, nb, "the nonce changes per response");
     assert.equal(directives(a.headers.get("content-security-policy")).get("form-action"), "'self'");
     // the hash is computed from the shipped asset, never a hand-copied string
@@ -218,7 +220,7 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
     assert.equal(r.headers.get("location"), "/keys", "no marker in the URL");
     const first = await keysGet();
     const html = await first.text();
-    checkPage(first, html, { script: true });
+    checkPage(first, html, { script: true, connect: true });
     assert.match(html, /<div class="tb-notice live" role="status"><span><strong>Saved Notes key for Notes\.<\/strong> Apps that use it pick it up within a minute\.<\/span><\/div>/);
     assert.ok(!html.includes(value), "the value is never shown");
     assert.match(html, /<span class="tb-tag live"><span class="tb-ink">Set<\/span><\/span>/);
@@ -237,7 +239,7 @@ describe("bridge pages: CSP, assets, notices (C185)", () => {
   test("the key page shows apps by name with their colour in the nonce'd block; Open Portal = TB_PORTAL_URL only", async () => {
     const r = await keysGet();
     const html = await r.text();
-    const nonce = checkPage(r, html, { script: true });
+    const nonce = checkPage(r, html, { script: true, connect: true });
     assert.match(html, /<span class="bp-app bp-a-notes">Notes<\/span>/, "the production name, not the product id");
     assert.ok(html.includes(`<style nonce="${nonce}">.bp-a-notes{--app:${NEUTRAL_APP_COLOR}}${KEYS_CSS}</style>`), "an app without a kit colour gets the neutral");
     // launch link expired: the app band + "Open <app> from Portal" to the configured Portal, whatever the request says
