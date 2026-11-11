@@ -47,7 +47,7 @@ test("listModels refusals: no key, refused key, provider error, bad body, too la
   assert.equal(called, false);
   assert.equal(((await listModels(answer({ error: { message: "Incorrect API key sk-secret" } }, 401), P("openai"), "embeddings", "https://api.openai.com/v1", "sk", valid)) as { refused: string }).refused, "key_refused");
   const down = await listModels(answer("upstream exploded sk-secret", 502), P("openai"), "embeddings", "https://api.openai.com/v1", "sk", valid);
-  assert.deepEqual(down, { refused: "provider_failed", reason: "OpenAI answered 502. Try again later." });
+  assert.deepEqual(down, { refused: "provider_failed", reason: "OpenAI did not give its model list. Try again later." }, "no status and no provider text");
   assert.equal(((await listModels(answer("not json"), P("openai"), "embeddings", "https://api.openai.com/v1", "sk", valid)) as { refused: string }).refused, "answer_invalid");
   const huge = await listModels(answer(`{"data":[${'{"id":"x"},'.repeat(LIST_MAX_BYTES / 10)}{"id":"y"}]}`), P("openai"), "embeddings", "https://api.openai.com/v1", "sk", valid);
   assert.equal((huge as { refused: string }).refused, "answer_invalid");

@@ -238,7 +238,8 @@ describe("model roles: page, resolve, status (RM-2..RM-6, RM-13 bridge half)", (
     assert.deepEqual(providers.slice(0, 3), ["ollama", "llama-server", "lm-studio"], "local providers listed first");
     assert.ok(!providers.includes("anthropic"), "only providers that serve the role");
     assert.match(html, /Suggested: OpenAI · gpt-hint · standard\. Nothing is saved until you save it\./);
-    assert.match(html, /<select class="tb-select-native" id="r-reasoning-d-model" name="model" required data-modelpick data-saved="gpt-hint"><option value="gpt-hint" selected>gpt-hint<\/option><\/select>/);
+    assert.match(html, /id="r-reasoning-d-model" name="model"[^>]*required value="gpt-hint" data-modeltyped>/, "the typed name works without the script");
+    assert.match(html, /<select class="tb-select-native" id="r-reasoning-d-model-list" name="model" data-modelpick hidden disabled data-saved="gpt-hint" data-saved-provider="openai">/);
     assert.equal(w.bridge.ctx.state.bindings.length, 0, "a hint stores nothing");
     assert.match(html, /I confirm a zero-data-retention contract with this provider/);
   });
@@ -639,13 +640,15 @@ describe("the model list of a binding form (Martin 2026-11-11): the provider's o
     assert.equal(bad.status, 403);
     const pub = await (await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: "http://203.0.113.9/v1" })).json();
     assert.equal(pub.refused, "list_unsupported", "plain http to a public address is refused before any call");
+    const meta = await (await h.list({ action: "models_list", role: "embeddings", provider: "openai-compatible", baseUrl: "https://169.254.169.254/v1" })).json();
+    assert.equal(meta.refused, "list_unsupported", "a metadata address is never called, also over https");
     assert.equal(seen.length, n, "no provider call");
   });
 
-  test("the page: a provider with a list gets the dropdown (connect-src 'self'), one without gets the typed name", async () => {
+  test("the page: the list select for the script, the typed name without it; each provider says if it has a list", async () => {
     const html = await h.page();
-    assert.match(html, /<select class="tb-select-native" id="r-embeddings-d-model" name="model" required data-modelpick>/);
-    assert.match(html, /<input class="tb-input" id="r-embeddings-d-model-typed" name="model"[^>]*data-modeltyped hidden disabled>/);
+    assert.match(html, /<select class="tb-select-native" id="r-embeddings-d-model-list" name="model" data-modelpick hidden disabled>/, "the script shows the list");
+    assert.match(html, /<input class="tb-input" id="r-embeddings-d-model" name="model"[^>]*required value="" data-modeltyped>/, "without the script: the typed name");
     assert.match(html, /data-needskey="1" data-list="0">Azure OpenAI/);
     assert.match(html, /data-list="1">OpenAI</);
   });

@@ -23,6 +23,8 @@ const MAX_PUBLIC_BODY = 1024 * 1024;
 /** open WebSocket upgrades per client address, and their idle timeout (H-6) */
 const MAX_UPGRADES_PER_CLIENT = 20;
 const UPGRADE_IDLE_MS = 10 * 60_000;
+/** model lists the key page may load at the same time, for the whole bridge */
+const MAX_LISTS_IN_FLIGHT = 4;
 
 interface KeySession {
   csrf: string;
@@ -45,6 +47,8 @@ export class PersonSurfaces {
   private readonly keysPostLimit = new RateLimiter(30);
   /** the model lists of the key page (`POST /keys?list=1`): its own budget, so opening forms never uses up the saves */
   private readonly modelsListLimit = new RateLimiter(60);
+  /** model lists in flight (each may wait 10 s on a provider): a few at a time for the whole bridge */
+  private listsInFlight = 0;
   private readonly upgrades = new OpenCounter(MAX_UPGRADES_PER_CLIENT);
 
   constructor(ctx: BridgeContext) {
@@ -284,7 +288,16 @@ export class PersonSurfaces {
       if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, notSaved("the form expired. Go back to the keys and try again."));
       // the model list of a binding form (page script, JSON): read only, nothing is stored
       if (listing) {
-        const list = form.get("action") === "models_list" ? await modelsList(this.ctx, form) : { refused: "list_unsupported", reason: "unknown request." };
+        let list: Awaited<ReturnType<typeof modelsList>> = { refused: "list_unsupported", reason: "unknown request." };
+        if (form.get("action") === "models_list" && this.listsInFlight >= MAX_LISTS_IN_FLIGHT) list = { refused: "provider_failed", reason: "the bridge is loading other model lists. Try again in a moment." };
+        else if (form.get("action") === "models_list") {
+          this.listsInFlight++;
+          try {
+            list = await modelsList(this.ctx, form);
+          } finally {
+            this.listsInFlight--;
+          }
+        }
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(list));
         return;
       }

@@ -121,7 +121,7 @@ export async function listModels(
   try {
     res = await fetchFn(req.url, { headers: { accept: "application/json", ...req.headers }, redirect: "error", signal: AbortSignal.timeout(LIST_TIMEOUT_MS) });
   } catch {
-    return { refused: "provider_failed", reason: `${p.label} did not answer. Check the address and try again.` };
+    return { refused: "provider_failed", reason: `${p.label} did not give its model list. Try again later.` };
   }
   if (res.status === 401 || res.status === 403) {
     await res.body?.cancel().catch(() => {});
@@ -129,7 +129,7 @@ export async function listModels(
   }
   if (!res.ok) {
     await res.body?.cancel().catch(() => {});
-    return { refused: "provider_failed", reason: `${p.label} answered ${res.status}. Try again later.` };
+    return { refused: "provider_failed", reason: `${p.label} did not give its model list. Try again later.` };
   }
   let body: unknown;
   try {

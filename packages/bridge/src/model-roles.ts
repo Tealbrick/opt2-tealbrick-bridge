@@ -91,6 +91,13 @@ function neverLocal(h: HostInfo): boolean {
   return false;
 }
 
+/** A URL the bridge itself must never call (the key page's model list): unparsable, or link-local, cloud metadata or
+ *  unspecified (step 3) for ANY scheme. A save keeps its own rule (classifyBase): this is only for the bridge's own call. */
+export function neverCallUrl(href: string): boolean {
+  const u = parseModelUrl(href);
+  return !u || neverLocal(hostInfo(u));
+}
+
 /** private / loopback addresses of step 4 */
 function privateAddress(h: HostInfo): boolean {
   if (h.ip4) return PRIVATE4.some(([base, bits]) => in4(h.ip4 as string, base, bits));
